@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+
+    env:
+      DOTNET_VERSION: 10.0.x
+      CONFIGURATION: Release
+      PROJECT_PATH: CodexHelper\CodexHelper.csproj
+      TEST_PROJECT_PATH: CodexHelper.Tests\CodexHelper.Tests.csproj
+      PUBLISH_PROFILE: win-x64-singlefile-framework
+
+    steps:
+      - name: Resolve release tag
+        id: vars
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            throw "Release tag '$tag' must look like v1.2.3 or v1.2.3-beta.1."
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          "archive_name=CodexHelper-$tag-win-x64.zip" >> $env:GITHUB_OUTPUT
+          "checksum_name=CodexHelper-$tag-win-x64.sha256" >> $env:GITHUB_OUTPUT
+
+      - name: Checkout tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.vars.outputs.tag }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore app
+        run: dotnet restore $env:PROJECT_PATH
+
+      - name: Restore unit tests
+        run: dotnet restore $env:TEST_PROJECT_PATH
+
+      - name: Build app
+        run: dotnet build $env:PROJECT_PATH -c $env:CONFIGURATION --no-restore
+
+      - name: Build unit tests
+        run: dotnet build $env:TEST_PROJECT_PATH -c $env:CONFIGURATION --no-restore
+
+      - name: Run unit tests
+        run: dotnet test $env:TEST_PROJECT_PATH -c $env:CONFIGURATION --no-build --verbosity normal
+
+      - name: Publish app
+        shell: pwsh
+        run: |
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\publish\win-x64-singlefile-framework"
+          Remove-Item -LiteralPath $publishDir -Recurse -Force -ErrorAction SilentlyContinue
+          dotnet publish $env:PROJECT_PATH -p:PublishProfile=$env:PUBLISH_PROFILE -p:Version=${{ steps.vars.outputs.version }}
+
+      - name: Package release assets
+        id: package
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $archiveName = "${{ steps.vars.outputs.archive_name }}"
+          $checksumName = "${{ steps.vars.outputs.checksum_name }}"
+          $publishDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\publish\win-x64-singlefile-framework"
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "artifacts\release"
+          $stageDir = Join-Path $releaseDir "CodexHelper-$tag-win-x64"
+          $archivePath = Join-Path $releaseDir $archiveName
+          $checksumPath = Join-Path $releaseDir $checksumName
+
+          Remove-Item -LiteralPath $releaseDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+          Copy-Item -Path (Join-Path $publishDir "*") -Destination $stageDir -Recurse
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "README.md") -Destination $stageDir
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "LICENSE") -Destination $stageDir
+
+          Compress-Archive -Path (Join-Path $stageDir "*") -DestinationPath $archivePath -Force
+          $hash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath $checksumPath -Encoding ascii -Value "$hash  $archiveName"
+
+          "archive_path=$archivePath" >> $env:GITHUB_OUTPUT
+          "checksum_path=$checksumPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: CodexHelper-${{ steps.vars.outputs.tag }}-win-x64
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.checksum_path }}
+          if-no-files-found: error
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ github.workspace }}/artifacts/release/*.zip
+            ${{ github.workspace }}/artifacts/release/*.sha256
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.vars.outputs.tag }}"
+          $archivePath = "${{ steps.package.outputs.archive_path }}"
+          $checksumPath = "${{ steps.package.outputs.checksum_path }}"
+          $archiveName = "${{ steps.vars.outputs.archive_name }}"
+          $checksumName = "${{ steps.vars.outputs.checksum_name }}"
+          $notes = @(
+            "## Download",
+            "",
+            "- ``$archiveName`` - framework-dependent Windows x64 build.",
+            "- ``$checksumName`` - SHA-256 checksum.",
+            "",
+            "Requires Windows and the .NET 10 Desktop Runtime x64.",
+            "",
+            "## Verification",
+            "",
+            "Check the downloaded file hash against ``$checksumName``.",
+            "",
+            "````powershell",
+            "Get-FileHash .\$archiveName -Algorithm SHA256",
+            "````",
+            "",
+            "Verify the GitHub artifact attestation:",
+            "",
+            "````powershell",
+            "gh attestation verify .\$archiveName --repo $env:GITHUB_REPOSITORY",
+            "````"
+          ) -join "`n"
+
+          $args = @(
+            "release", "create", $tag,
+            $archivePath, $checksumPath,
+            "--repo", $env:GITHUB_REPOSITORY,
+            "--verify-tag",
+            "--title", "CodexHelper $tag",
+            "--notes", $notes,
+            "--generate-notes"
+          )
+
+          if ($tag -match "-") {
+            $args += "--prerelease"
+          }
+
+          gh @args
