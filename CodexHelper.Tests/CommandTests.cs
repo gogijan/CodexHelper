@@ -56,4 +56,21 @@ public sealed class CommandTests
         Assert.AreEqual(1, executeCount);
         Assert.AreEqual(2, changedCount);
     }
+
+    [TestMethod]
+    public async Task AsyncCommand_ReportsUnhandledExceptionAndReenables()
+    {
+        var expected = new InvalidOperationException("boom");
+        Exception? captured = null;
+        var command = new AsyncCommand(
+            () => Task.FromException(expected),
+            exceptionHandler: ex => captured = ex);
+
+        command.Execute(null);
+
+        await TestWait.UntilAsync(() => captured is not null && command.CanExecute(null));
+
+        Assert.AreSame(expected, captured);
+        Assert.IsTrue(command.CanExecute(null));
+    }
 }

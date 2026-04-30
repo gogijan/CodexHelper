@@ -30,7 +30,9 @@ public sealed class ThreadItemViewModel : ObservableObject
 
     public bool IsChat => Model.IsChat;
 
-    public string UpdatedAtText => Model.UpdatedAt?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? string.Empty;
+    public string UpdatedAtText => Model.UpdatedAt is { } updatedAt
+        ? _localization.FormatShortDateTimeWithAge(updatedAt)
+        : string.Empty;
 
     public bool IsArchived => Model.IsArchived;
 
@@ -78,8 +80,23 @@ public sealed class ThreadItemViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(ProjectName));
+        OnPropertyChanged(nameof(UpdatedAtText));
         OnPropertyChanged(nameof(StateText));
         OnPropertyChanged(nameof(OpenInCodexText));
+    }
+
+    public void RefreshTimeDependentText()
+    {
+        if (Model.UpdatedAt is null)
+        {
+            return;
+        }
+
+        OnPropertyChanged(nameof(UpdatedAtText));
+        if (string.IsNullOrWhiteSpace(Model.Name))
+        {
+            OnPropertyChanged(nameof(Name));
+        }
     }
 
     private string BuildUntitledName()

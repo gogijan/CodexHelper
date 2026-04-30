@@ -45,7 +45,11 @@ public static class ConversationDocumentBuilder
 
         foreach (var message in messages)
         {
-            AddMessage(document, message, viewModel.GetRoleDisplayName(message));
+            AddMessage(
+                document,
+                message,
+                viewModel.GetRoleDisplayName(message),
+                viewModel.FormatMessageTimestamp(message.Timestamp));
         }
     }
 
@@ -69,9 +73,13 @@ public static class ConversationDocumentBuilder
         return false;
     }
 
-    public static void AddConversationMessage(FlowDocument document, ConversationMessage message, string roleText)
+    public static void AddConversationMessage(
+        FlowDocument document,
+        ConversationMessage message,
+        string roleText,
+        string timestampText)
     {
-        AddMessage(document, message, roleText);
+        AddMessage(document, message, roleText, timestampText);
     }
 
     public static void AddNotice(FlowDocument document, string text)
@@ -133,7 +141,11 @@ public static class ConversationDocumentBuilder
         });
     }
 
-    private static void AddMessage(FlowDocument document, ConversationMessage message, string roleText)
+    private static void AddMessage(
+        FlowDocument document,
+        ConversationMessage message,
+        string roleText,
+        string timestampText)
     {
         var header = new Paragraph
         {
@@ -146,9 +158,9 @@ public static class ConversationDocumentBuilder
             Foreground = BrushForKind(message.Kind)
         });
 
-        if (message.Timestamp is not null)
+        if (!string.IsNullOrWhiteSpace(timestampText))
         {
-            header.Inlines.Add(new Run($"  {message.Timestamp.Value.LocalDateTime:yyyy-MM-dd HH:mm}")
+            header.Inlines.Add(new Run($"  {timestampText}")
             {
                 Foreground = MutedText,
                 FontSize = 11

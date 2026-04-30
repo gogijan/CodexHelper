@@ -62,6 +62,11 @@ public sealed class ThreadNodeViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(Name));
         }
 
+        if (e.PropertyName is nameof(ThreadItemViewModel.UpdatedAtText))
+        {
+            OnPropertyChanged(nameof(UpdatedAtText));
+        }
+
         if (e.PropertyName is nameof(ThreadItemViewModel.StateText) or nameof(ThreadItemViewModel.IsArchived))
         {
             OnPropertyChanged(nameof(StateText));

@@ -1,3 +1,4 @@
+using System.Globalization;
 using CodexHelper.Models;
 using CodexHelper.Services;
 using CodexHelper.ViewModels;
@@ -7,6 +8,45 @@ namespace CodexHelper.Tests;
 [TestClass]
 public sealed class MainViewModelTests
 {
+    [TestMethod]
+    public void LoadSettings_UsesRussianWhenLanguageIsMissingAndUiCultureIsRussian()
+    {
+        using var culture = new TemporaryUiCulture("ru-RU");
+        var harness = CreateHarness(new AppSettings());
+
+        harness.ViewModel.LoadSettings();
+
+        Assert.AreEqual("ru", harness.ViewModel.SelectedLanguageCode);
+        Assert.AreEqual("CodexHelper", harness.ViewModel.WindowTitle);
+        Assert.AreEqual("ru", harness.SettingsService.Settings.Language);
+        Assert.IsTrue(harness.SettingsService.Settings.IsLanguageConfigured);
+    }
+
+    [TestMethod]
+    public void LoadSettings_UsesEnglishWhenLanguageIsMissingAndUiCultureIsNotRussian()
+    {
+        using var culture = new TemporaryUiCulture("en-US");
+        var harness = CreateHarness(new AppSettings());
+
+        harness.ViewModel.LoadSettings();
+
+        Assert.AreEqual("en", harness.ViewModel.SelectedLanguageCode);
+        Assert.AreEqual("CodexHelper", harness.ViewModel.WindowTitle);
+        Assert.AreEqual("en", harness.SettingsService.Settings.Language);
+        Assert.IsTrue(harness.SettingsService.Settings.IsLanguageConfigured);
+    }
+
+    [TestMethod]
+    public void LoadSettings_UsesConfiguredLanguageOverUiCulture()
+    {
+        using var culture = new TemporaryUiCulture("en-US");
+        var harness = CreateHarness(new AppSettings { Language = "ru", IsLanguageConfigured = true });
+
+        harness.ViewModel.LoadSettings();
+
+        Assert.AreEqual("ru", harness.ViewModel.SelectedLanguageCode);
+    }
+
     [TestMethod]
     public async Task InitializeAsync_LoadsThreadsIntoActiveProjectTreeAndStartsMonitor()
     {
@@ -79,7 +119,7 @@ public sealed class MainViewModelTests
 
         Assert.AreSame(alpha, harness.ViewModel.SelectedThread);
         Assert.AreEqual("Alpha thread", harness.ViewModel.StatusText);
-        Assert.AreEqual("gpt-5 high 200,000", harness.ViewModel.ModelEffortText);
+        Assert.AreEqual("gpt-5 high 200k", harness.ViewModel.ModelEffortText);
         Assert.AreEqual("Dev", harness.ViewModel.DeveloperInstructions);
         Assert.AreEqual("User", harness.ViewModel.UserInstructions);
         CollectionAssert.AreEqual(
@@ -91,9 +131,7 @@ public sealed class MainViewModelTests
         Assert.AreEqual("parameters", harness.ViewModel.ThreadParameterNodes[0].Name);
         Assert.AreEqual("alpha", harness.ViewModel.ThreadParameterNodes[0].Children.Single().Value);
 
-        var messagesForRender = harness.ViewModel.TakeConversationMessagesForRender();
-        Assert.AreEqual(1, messagesForRender.Count);
-        Assert.AreEqual(0, harness.ViewModel.ConversationMessages.Count);
+        Assert.AreEqual(1, harness.ViewModel.ConversationMessages.Count);
 
         await harness.ViewModel.ShutdownAsync();
     }
@@ -159,7 +197,7 @@ public sealed class MainViewModelTests
         await harness.ViewModel.ShutdownAsync();
     }
 
-    private static MainViewModelHarness CreateHarness()
+    private static MainViewModelHarness CreateHarness(AppSettings? settings = null)
     {
         var threadService = new FakeCodexThreadService
         {
@@ -187,7 +225,10 @@ public sealed class MainViewModelTests
             Parameters = """{"id":"unknown"}"""
         };
 
-        var settingsService = new FakeAppSettingsService();
+        var settingsService = new FakeAppSettingsService
+        {
+            Settings = settings ?? new AppSettings { Language = "en", IsLanguageConfigured = true }
+        };
         var monitor = new FakeThreadTreeMonitor();
         var diagnostics = new FakeDiagnosticsService();
         var viewModel = new MainViewModel(
@@ -341,6 +382,22 @@ public sealed class MainViewModelTests
                 RolloutIndexCachePath = @"C:\Temp\rollout-index.json",
                 SettingsPath = @"C:\Temp\settings.json"
             });
+        }
+    }
+
+    private sealed class TemporaryUiCulture : IDisposable
+    {
+        private readonly CultureInfo _previousCulture;
+
+        public TemporaryUiCulture(string cultureName)
+        {
+            _previousCulture = CultureInfo.CurrentUICulture;
+            CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(cultureName);
+        }
+
+        public void Dispose()
+        {
+            CultureInfo.CurrentUICulture = _previousCulture;
         }
     }
 }

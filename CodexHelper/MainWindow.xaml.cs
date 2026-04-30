@@ -18,13 +18,13 @@ public partial class MainWindow : Window
 {
     private const int ConversationRenderBatchSize = 12;
     private const int ConversationRenderMessageLimit = 500;
-    private const double ProjectPaneMaximumWindowFraction = 0.5;
 
     private readonly MainViewModel _viewModel = new();
     private readonly FlowDocument _conversationDocument = ConversationDocumentBuilder.CreateDocument();
     private readonly FlowDocument _developerInstructionsDocument = ConversationDocumentBuilder.CreateDocument();
     private readonly FlowDocument _userInstructionsDocument = ConversationDocumentBuilder.CreateDocument();
     private readonly DispatcherTimer _memoryCleanupTimer;
+    private readonly DispatcherTimer _relativeTimeRefreshTimer;
     private CancellationTokenSource? _conversationRenderCancellation;
     private bool _developerInstructionsDirty = true;
     private bool _userInstructionsDirty = true;
@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     private bool _renderedConversationHasMessages;
     private double? _normalWindowWidth;
     private double? _normalWindowHeight;
+    private bool _projectPaneConstraintUpdateQueued;
     private bool _loaded;
 
     public MainWindow()
@@ -48,6 +49,12 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(4)
         };
         _memoryCleanupTimer.Tick += OnMemoryCleanupTimerTick;
+
+        _relativeTimeRefreshTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMinutes(1)
+        };
+        _relativeTimeRefreshTimer.Tick += OnRelativeTimeRefreshTimerTick;
 
         ConversationViewer.Document = _conversationDocument;
         DeveloperInstructionsViewer.Document = _developerInstructionsDocument;
@@ -67,6 +74,7 @@ public partial class MainWindow : Window
 
         _loaded = true;
         await _viewModel.InitializeAsync();
+        _relativeTimeRefreshTimer.Start();
         UpdateAllDocuments();
     }
 
@@ -76,6 +84,8 @@ public partial class MainWindow : Window
         CancelConversationRender();
         _memoryCleanupTimer.Stop();
         _memoryCleanupTimer.Tick -= OnMemoryCleanupTimerTick;
+        _relativeTimeRefreshTimer.Stop();
+        _relativeTimeRefreshTimer.Tick -= OnRelativeTimeRefreshTimerTick;
         SizeChanged -= Window_SizeChanged;
         StateChanged -= Window_StateChanged;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
@@ -89,6 +99,8 @@ public partial class MainWindow : Window
 
     private void ApplySavedWindowLayout()
     {
+        EnsureMinimumWindowWidth();
+
         if (_viewModel.SavedWindowWidth is { } windowWidth &&
             _viewModel.SavedWindowHeight is { } windowHeight &&
             IsUsableLength(windowWidth) &&
@@ -98,7 +110,7 @@ public partial class MainWindow : Window
             Height = Math.Clamp(windowHeight, MinHeight, Math.Max(MinHeight, SystemParameters.VirtualScreenHeight));
         }
 
-        UpdateProjectPaneMaximumWidth();
+        UpdateProjectPaneWidthConstraints();
 
         if (_viewModel.SavedProjectPaneWidth is { } projectPaneWidth &&
             IsUsableLength(projectPaneWidth))
@@ -136,6 +148,8 @@ public partial class MainWindow : Window
     private void Window_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         TrackNormalWindowSize();
+        UpdateProjectPaneWidthConstraints();
+        QueueProjectPaneConstraintUpdate();
     }
 
     private void Window_StateChanged(object? sender, EventArgs e)
@@ -175,35 +189,50 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string BuildDiagnosticsText(DiagnosticsSnapshot snapshot)
+    private string BuildDiagnosticsText(DiagnosticsSnapshot snapshot)
     {
         var candidates = snapshot.CodexCandidates.Count == 0
-            ? "(none)"
+            ? _viewModel.GetLocalizedString("DiagnosticsNone")
             : string.Join(Environment.NewLine, snapshot.CodexCandidates.Select(candidate => $"  - {candidate}"));
 
         return string.Join(
             Environment.NewLine,
-            "CodexHelper diagnostics",
+            _viewModel.GetLocalizedString("DiagnosticsTitle"),
             "",
-            $"Mode: {snapshot.Mode}",
-            $"Codex probe: {snapshot.CodexProbeStatus ?? "(not checked)"}",
-            $"Selected Codex: {snapshot.SelectedCodexPath ?? "(none)"}",
-            "Codex candidates:",
+            FormatDiagnosticsLine("DiagnosticsMode", LocalizeDiagnosticsMode(snapshot.Mode)),
+            FormatDiagnosticsLine("DiagnosticsCodexProbe", snapshot.CodexProbeStatus ?? _viewModel.GetLocalizedString("DiagnosticsNotChecked")),
+            FormatDiagnosticsLine("DiagnosticsSelectedCodex", snapshot.SelectedCodexPath ?? _viewModel.GetLocalizedString("DiagnosticsNone")),
+            $"{_viewModel.GetLocalizedString("DiagnosticsCodexCandidates")}:",
             candidates,
             "",
-            $"Codex home: {snapshot.CodexHome}",
-            $"Sessions: {snapshot.SessionsRoot}",
-            $"Archived sessions: {snapshot.ArchivedSessionsRoot}",
-            $"Active rollout files: {snapshot.ActiveRolloutFileCount}",
-            $"Archived rollout files: {snapshot.ArchivedRolloutFileCount}",
+            FormatDiagnosticsLine("DiagnosticsCodexHome", snapshot.CodexHome),
+            FormatDiagnosticsLine("DiagnosticsSessions", snapshot.SessionsRoot),
+            FormatDiagnosticsLine("DiagnosticsArchivedSessions", snapshot.ArchivedSessionsRoot),
+            FormatDiagnosticsLine("DiagnosticsActiveRolloutFiles", snapshot.ActiveRolloutFileCount.ToString("N0", _viewModel.Culture)),
+            FormatDiagnosticsLine("DiagnosticsArchivedRolloutFiles", snapshot.ArchivedRolloutFileCount.ToString("N0", _viewModel.Culture)),
             "",
-            $"Settings: {snapshot.SettingsPath}",
-            $"Rollout index cache: {snapshot.RolloutIndexCachePath}",
-            $"Log: {snapshot.LogPath}",
+            FormatDiagnosticsLine("DiagnosticsSettings", snapshot.SettingsPath),
+            FormatDiagnosticsLine("DiagnosticsRolloutIndexCache", snapshot.RolloutIndexCachePath),
+            FormatDiagnosticsLine("DiagnosticsLog", snapshot.LogPath),
             "",
-            "Yes: copy diagnostics",
-            "No: open log file",
-            "Cancel: close");
+            _viewModel.GetLocalizedString("DiagnosticsCopyAction"),
+            _viewModel.GetLocalizedString("DiagnosticsOpenLogAction"),
+            _viewModel.GetLocalizedString("DiagnosticsCloseAction"));
+    }
+
+    private string FormatDiagnosticsLine(string key, string value)
+    {
+        return $"{_viewModel.GetLocalizedString(key)}: {value}";
+    }
+
+    private string LocalizeDiagnosticsMode(string mode)
+    {
+        return mode switch
+        {
+            "Read-only" => _viewModel.GetLocalizedString("DiagnosticsModeReadOnly"),
+            "App-server" => _viewModel.GetLocalizedString("DiagnosticsModeAppServer"),
+            _ => mode
+        };
     }
 
     private static void OpenPath(string path)
@@ -395,7 +424,8 @@ public partial class MainWindow : Window
 
     private void MainContentGrid_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        UpdateProjectPaneMaximumWidth();
+        UpdateProjectPaneWidthConstraints();
+        QueueProjectPaneConstraintUpdate();
     }
 
     private void OnViewModelPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
@@ -434,8 +464,8 @@ public partial class MainWindow : Window
 
     private void UpdateConversationDocument()
     {
-        var messages = _viewModel.TakeConversationMessagesForRender();
-        _renderedConversationHasMessages = messages.Count > 0;
+        var messages = _viewModel.ConversationMessages.ToArray();
+        _renderedConversationHasMessages = messages.Length > 0;
         StartConversationRender(messages);
     }
 
@@ -552,7 +582,10 @@ public partial class MainWindow : Window
                 messagesToRender = messages.Skip(skipped).ToArray();
                 ConversationDocumentBuilder.AddNotice(
                     _conversationDocument,
-                    string.Format(_viewModel.ConversationTruncatedText, messagesToRender.Count, messages.Count));
+                    _viewModel.FormatLocalizedString(
+                        "ConversationTruncated",
+                        messagesToRender.Count,
+                        messages.Count));
             }
 
             ScrollToHome(ConversationViewer);
@@ -564,7 +597,8 @@ public partial class MainWindow : Window
                 ConversationDocumentBuilder.AddConversationMessage(
                     _conversationDocument,
                     message,
-                    _viewModel.GetRoleDisplayName(message));
+                    _viewModel.GetRoleDisplayName(message),
+                    _viewModel.FormatMessageTimestamp(message.Timestamp));
 
                 if ((index + 1) % ConversationRenderBatchSize == 0 ||
                     batchStopwatch.ElapsedMilliseconds >= 12)
@@ -621,6 +655,11 @@ public partial class MainWindow : Window
         ReleaseUnusedMemory();
     }
 
+    private void OnRelativeTimeRefreshTimerTick(object? sender, EventArgs e)
+    {
+        _viewModel.RefreshTimeDependentText();
+    }
+
     private static void ReleaseUnusedMemory()
     {
         GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.Default;
@@ -656,13 +695,33 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private void UpdateProjectPaneMaximumWidth()
+    private void UpdateProjectPaneWidthConstraints()
     {
+        EnsureMinimumWindowWidth();
+
         var maximumWidth = GetProjectPaneMaximumWidth();
         ProjectPaneColumn.MaxWidth = maximumWidth;
-        if (IsFinite(maximumWidth) && ProjectPaneColumn.ActualWidth > maximumWidth)
+        var currentWidth = GetProjectPanePreferredWidth();
+        if (!IsFinite(maximumWidth))
         {
-            ProjectPaneColumn.Width = new GridLength(maximumWidth);
+            return;
+        }
+
+        var constrainedWidth = Math.Clamp(currentWidth, ProjectPaneColumn.MinWidth, maximumWidth);
+        if (ThreadPreviewPane.ActualWidth > 0 &&
+            ThreadPreviewPane.ActualWidth < ThreadPreviewPane.MinWidth &&
+            ProjectPaneColumn.ActualWidth > ProjectPaneColumn.MinWidth)
+        {
+            var rightPaneDeficit = ThreadPreviewPane.MinWidth - ThreadPreviewPane.ActualWidth;
+            var deficitAdjustedWidth = Math.Max(
+                ProjectPaneColumn.MinWidth,
+                ProjectPaneColumn.ActualWidth - rightPaneDeficit);
+            constrainedWidth = Math.Min(constrainedWidth, deficitAdjustedWidth);
+        }
+
+        if (!AreClose(currentWidth, constrainedWidth))
+        {
+            ProjectPaneColumn.Width = new GridLength(constrainedWidth);
         }
     }
 
@@ -671,25 +730,91 @@ public partial class MainWindow : Window
         return Math.Clamp(width, ProjectPaneColumn.MinWidth, GetProjectPaneMaximumWidth());
     }
 
+    private double GetProjectPanePreferredWidth()
+    {
+        if (ProjectPaneColumn.Width.IsAbsolute && IsUsableLength(ProjectPaneColumn.Width.Value))
+        {
+            return ProjectPaneColumn.Width.Value;
+        }
+
+        return ProjectPaneColumn.ActualWidth;
+    }
+
     private double GetProjectPaneMaximumWidth()
     {
-        var layoutWidth = IsUsableLength(MainContentGrid.ActualWidth)
-            ? MainContentGrid.ActualWidth
-            : Width;
+        var layoutWidth = GetAvailableContentWidth();
 
         if (!IsUsableLength(layoutWidth))
         {
             return double.PositiveInfinity;
         }
 
-        var splitterWidth = IsUsableLength(SplitterColumn.ActualWidth)
+        var splitterWidth = GetSplitterWidth();
+        var maximumByRightPane = layoutWidth - splitterWidth - GetThreadPreviewMinimumColumnWidth();
+        return Math.Max(ProjectPaneColumn.MinWidth, maximumByRightPane);
+    }
+
+    private void EnsureMinimumWindowWidth()
+    {
+        ThreadPreviewColumn.MinWidth = GetThreadPreviewMinimumColumnWidth();
+
+        var minimumContentWidth = ProjectPaneColumn.MinWidth + GetSplitterWidth() + ThreadPreviewColumn.MinWidth;
+        var contentWidth = GetAvailableContentWidth();
+        var chromeWidth = IsUsableLength(ActualWidth) && IsUsableLength(contentWidth)
+            ? Math.Max(0, ActualWidth - contentWidth)
+            : 0;
+        var minimumWindowWidth = minimumContentWidth + chromeWidth;
+        MinWidth = minimumWindowWidth;
+        if (WindowState == WindowState.Normal && IsUsableLength(Width) && Width < MinWidth)
+        {
+            Width = MinWidth;
+        }
+    }
+
+    private void QueueProjectPaneConstraintUpdate()
+    {
+        if (_projectPaneConstraintUpdateQueued)
+        {
+            return;
+        }
+
+        _projectPaneConstraintUpdateQueued = true;
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.Render,
+            new Action(() =>
+            {
+                _projectPaneConstraintUpdateQueued = false;
+                UpdateProjectPaneWidthConstraints();
+            }));
+    }
+
+    private double GetAvailableContentWidth()
+    {
+        if (IsUsableLength(RootGrid.ActualWidth))
+        {
+            return RootGrid.ActualWidth;
+        }
+
+        if (Content is FrameworkElement contentElement && IsUsableLength(contentElement.ActualWidth))
+        {
+            return contentElement.ActualWidth;
+        }
+
+        return IsUsableLength(ActualWidth) ? ActualWidth : Width;
+    }
+
+    private double GetThreadPreviewMinimumColumnWidth()
+    {
+        return ThreadPreviewPane.MinWidth +
+            ThreadPreviewPane.Margin.Left +
+            ThreadPreviewPane.Margin.Right;
+    }
+
+    private double GetSplitterWidth()
+    {
+        return IsUsableLength(SplitterColumn.ActualWidth)
             ? SplitterColumn.ActualWidth
             : SplitterColumn.Width.Value;
-        var maximumByRightPane = layoutWidth - splitterWidth - ThreadPreviewColumn.MinWidth;
-        var maximumByFraction = layoutWidth * ProjectPaneMaximumWindowFraction;
-        return Math.Max(
-            ProjectPaneColumn.MinWidth,
-            Math.Min(maximumByFraction, maximumByRightPane));
     }
 
     private static bool IsFinite(double? value)
@@ -705,6 +830,11 @@ public partial class MainWindow : Window
     private static bool IsUsableLength(double? value)
     {
         return value is { } number && IsFinite(number) && number > 0;
+    }
+
+    private static bool AreClose(double left, double right)
+    {
+        return Math.Abs(left - right) < 0.5;
     }
 
     private void CopySelectedParameterNode()

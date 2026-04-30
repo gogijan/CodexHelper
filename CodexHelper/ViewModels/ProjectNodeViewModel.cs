@@ -1,21 +1,29 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using CodexHelper.Infrastructure;
+using CodexHelper.Services;
 
 namespace CodexHelper.ViewModels;
 
 public sealed class ProjectNodeViewModel : ObservableObject, IDisposable
 {
+    private readonly LocalizationService _localization;
     private bool _isUpdatingCheckState;
     private bool _isExpanded;
     private bool _isTreeSelected;
     private bool _disposed;
 
-    public ProjectNodeViewModel(string key, string displayName, string? fullPath, IEnumerable<ThreadItemViewModel> threads)
+    public ProjectNodeViewModel(
+        string key,
+        string displayName,
+        string? fullPath,
+        IEnumerable<ThreadItemViewModel> threads,
+        LocalizationService localization)
     {
         Key = key;
         DisplayName = displayName;
         FullPath = fullPath;
+        _localization = localization;
 
         foreach (var thread in threads)
         {
@@ -35,7 +43,26 @@ public sealed class ProjectNodeViewModel : ObservableObject, IDisposable
 
     public ObservableCollection<ThreadNodeViewModel> Threads { get; } = new();
 
-    public string Header => $"{DisplayName} ({Threads.Count})";
+    public string Header
+    {
+        get
+        {
+            var threadCount = _localization.FormatNumber(Threads.Count);
+            DateTimeOffset? latestUpdatedAt = null;
+            foreach (var thread in Threads)
+            {
+                if (thread.Thread.Model.UpdatedAt is { } updatedAt &&
+                    (latestUpdatedAt is null || updatedAt > latestUpdatedAt.Value))
+                {
+                    latestUpdatedAt = updatedAt;
+                }
+            }
+
+            return latestUpdatedAt is null
+                ? $"{DisplayName}: {threadCount}"
+                : $"{DisplayName}: {threadCount} ({_localization.FormatElapsedSince(latestUpdatedAt.Value, DateTimeOffset.Now)})";
+        }
+    }
 
     public bool IsExpanded
     {
@@ -103,6 +130,11 @@ public sealed class ProjectNodeViewModel : ObservableObject, IDisposable
         if (e.PropertyName == nameof(ThreadNodeViewModel.IsChecked))
         {
             OnPropertyChanged(nameof(IsChecked));
+        }
+
+        if (e.PropertyName == nameof(ThreadNodeViewModel.UpdatedAtText))
+        {
+            OnPropertyChanged(nameof(Header));
         }
     }
 

@@ -51,7 +51,7 @@ public sealed class ThreadViewModelTests
         var localization = new LocalizationService();
         var first = CreateThreadViewModel("first", localization);
         var second = CreateThreadViewModel("second", localization);
-        var project = new ProjectNodeViewModel("project", "Project", @"C:\Project", [first, second]);
+        var project = new ProjectNodeViewModel("project", "Project", @"C:\Project", [first, second], localization);
         var changedNames = new List<string?>();
         project.PropertyChanged += (_, e) => changedNames.Add(e.PropertyName);
 
@@ -70,6 +70,17 @@ public sealed class ThreadViewModelTests
         Assert.IsFalse(first.IsSelected);
         Assert.IsFalse(second.IsSelected);
         Assert.IsTrue(changedNames.Contains(nameof(ProjectNodeViewModel.IsChecked)));
+    }
+
+    [TestMethod]
+    public void ProjectNodeViewModel_HeaderIncludesThreadCountAndLatestAge()
+    {
+        var localization = new LocalizationService();
+        var first = CreateThreadViewModel("first", localization, DateTimeOffset.Now.AddDays(-8));
+        var second = CreateThreadViewModel("second", localization, DateTimeOffset.Now.AddHours(-2));
+        var project = new ProjectNodeViewModel("project", "Project", @"C:\Project", [first, second], localization);
+
+        StringAssert.StartsWith(project.Header, "Project: 2 (2h)");
     }
 
     [TestMethod]
@@ -93,14 +104,18 @@ public sealed class ThreadViewModelTests
         CollectionAssert.Contains(changedNames, nameof(ThreadNodeViewModel.IsOpenInCodex));
     }
 
-    private static ThreadItemViewModel CreateThreadViewModel(string id, LocalizationService localization)
+    private static ThreadItemViewModel CreateThreadViewModel(
+        string id,
+        LocalizationService localization,
+        DateTimeOffset? updatedAt = null)
     {
         return new ThreadItemViewModel(
             new CodexThread
             {
                 Id = id,
                 Name = id,
-                Cwd = @"C:\Project"
+                Cwd = @"C:\Project",
+                UpdatedAt = updatedAt
             },
             localization);
     }

@@ -350,15 +350,16 @@ public sealed class CodexAppServerClient : IAsyncDisposable
                     break;
                 }
 
+                var redactedLine = DiagnosticLogService.RedactSensitiveData(line);
                 lock (_stderr)
                 {
                     if (_stderr.Length < 16000)
                     {
-                        _stderr.AppendLine(line);
+                        _stderr.AppendLine(redactedLine);
                     }
                 }
 
-                DiagnosticLogService.Warning($"Codex app-server stderr: {line}");
+                DiagnosticLogService.Warning($"Codex app-server stderr: {redactedLine}");
             }
         }
         catch (OperationCanceledException)
@@ -392,8 +393,9 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
             if (root.TryGetProperty("error", out var error))
             {
-                DiagnosticLogService.Warning($"Codex app-server returned error for {pending.Method}: {error.GetRawText()}");
-                pending.SetException(new AppServerException($"app-server returned error for {pending.Method}: {error.GetRawText()}"));
+                var errorText = DiagnosticLogService.RedactSensitiveData(error.GetRawText());
+                DiagnosticLogService.Warning($"Codex app-server returned error for {pending.Method}: {errorText}");
+                pending.SetException(new AppServerException($"app-server returned error for {pending.Method}: {errorText}"));
                 return;
             }
 
@@ -573,7 +575,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
                 return string.Empty;
             }
 
-            return $"stderr: {_stderr}";
+            return $"stderr: {DiagnosticLogService.RedactSensitiveData(_stderr.ToString())}";
         }
     }
 

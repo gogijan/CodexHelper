@@ -35,6 +35,7 @@ public sealed class AppSettingsServiceTests
         var actual = await service.LoadAsync();
 
         Assert.AreEqual("ru", actual.Language);
+        Assert.IsTrue(actual.IsLanguageConfigured);
         Assert.AreEqual(1200, actual.WindowWidth);
         Assert.AreEqual(800, actual.WindowHeight);
         Assert.AreEqual(360, actual.ProjectPaneWidth);
@@ -54,6 +55,21 @@ public sealed class AppSettingsServiceTests
     }
 
     [TestMethod]
+    public async Task LoadAsync_MarksLanguageUnconfiguredWhenLanguagePropertyIsMissing()
+    {
+        using var temp = TempDirectory.Create();
+        var service = new AppSettingsService(temp.DirectoryPath);
+        Directory.CreateDirectory(temp.DirectoryPath);
+        await File.WriteAllTextAsync(service.SettingsPath, """{"WindowWidth":1200}""");
+
+        var settings = await service.LoadAsync();
+
+        Assert.AreEqual("en", settings.Language);
+        Assert.IsFalse(settings.IsLanguageConfigured);
+        Assert.AreEqual(1200, settings.WindowWidth);
+    }
+
+    [TestMethod]
     public async Task SaveAsync_CreatesSettingsDirectory()
     {
         using var temp = TempDirectory.Create();
@@ -65,9 +81,21 @@ public sealed class AppSettingsServiceTests
         Assert.IsTrue(File.Exists(service.SettingsPath));
     }
 
+    [TestMethod]
+    public async Task SaveAsync_DoesNotLeaveTemporaryFilesAfterSuccessfulSave()
+    {
+        using var temp = TempDirectory.Create();
+        var service = new AppSettingsService(temp.DirectoryPath);
+
+        await service.SaveAsync(new AppSettings { Language = "ru" });
+
+        Assert.AreEqual(0, Directory.EnumerateFiles(temp.DirectoryPath, "*.tmp").Count());
+    }
+
     private static void AssertDefaultSettings(AppSettings settings)
     {
         Assert.AreEqual("en", settings.Language);
+        Assert.IsFalse(settings.IsLanguageConfigured);
         Assert.IsNull(settings.WindowWidth);
         Assert.IsNull(settings.WindowHeight);
         Assert.IsNull(settings.ProjectPaneWidth);

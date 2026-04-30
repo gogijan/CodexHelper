@@ -1,3 +1,4 @@
+using System.Globalization;
 using CodexHelper.Infrastructure;
 
 namespace CodexHelper.Services;
@@ -39,7 +40,7 @@ public sealed class LocalizationService : ObservableObject
             ["UntitledThread"] = "Untitled",
             ["NoSession"] = "Select a session to preview the conversation.",
             ["NoMessages"] = "No displayable messages were returned for this session.",
-            ["ConversationTruncated"] = "Showing the latest {0} of {1} messages.",
+            ["ConversationTruncated"] = "Showing the latest {0:N0} of {1:N0} messages.",
             ["Loading"] = "Loading...",
             ["Ready"] = "Ready",
             ["Active"] = "Active",
@@ -61,16 +62,42 @@ public sealed class LocalizationService : ObservableObject
             ["NoParameters"] = "No parameters were found for this session.",
             ["CodexCliMissing"] = "Codex CLI was not found on PATH. Install Codex and make sure the `codex` command is available from a terminal.",
             ["CodexAppServerUnsupported"] = "Codex CLI is installed, but this version does not support `codex app-server`. Update Codex CLI or install a version with app-server support.",
-            ["ArchiveDone"] = "Archived {0} session(s).",
-            ["ElevateDone"] = "Elevated {0} session(s).",
-            ["RefreshDone"] = "Loaded {0} session(s) across {1} project(s).",
-            ["ReadOnlyRefreshDone"] = "Loaded {0} session(s) across {1} project(s) from local rollout files. Read-only mode: archive and elevate are unavailable.",
-            ["OperationPartialDone"] = "Completed {0} session(s), failed {1}. Last error: {2}",
+            ["ArchiveDone"] = "Archived {0:N0} session(s).",
+            ["ElevateDone"] = "Elevated {0:N0} session(s).",
+            ["RefreshDone"] = "Loaded {0:N0} session(s) across {1:N0} project(s).",
+            ["ReadOnlyRefreshDone"] = "Loaded {0:N0} session(s) across {1:N0} project(s) from local rollout files. Read-only mode: archive and elevate are unavailable.",
+            ["OperationPartialDone"] = "Completed {0:N0} session(s), failed {1:N0}. Last error: {2}",
             ["ReadOnlyOperationUnavailable"] = "This operation is unavailable in read-only mode because Codex app-server is not running.",
             ["OperationFailed"] = "Operation failed: {0}",
             ["OpenFailed"] = "Could not read this session: {0}",
             ["LoadingSession"] = "Loading session...",
             ["LoadingDiagnostics"] = "Loading diagnostics...",
+            ["DiagnosticsTitle"] = "CodexHelper diagnostics",
+            ["DiagnosticsMode"] = "Mode",
+            ["DiagnosticsModeReadOnly"] = "Read-only",
+            ["DiagnosticsModeAppServer"] = "App-server",
+            ["DiagnosticsCodexProbe"] = "Codex probe",
+            ["DiagnosticsSelectedCodex"] = "Selected Codex",
+            ["DiagnosticsCodexCandidates"] = "Codex candidates",
+            ["DiagnosticsCodexHome"] = "Codex home",
+            ["DiagnosticsSessions"] = "Sessions",
+            ["DiagnosticsArchivedSessions"] = "Archived sessions",
+            ["DiagnosticsActiveRolloutFiles"] = "Active rollout files",
+            ["DiagnosticsArchivedRolloutFiles"] = "Archived rollout files",
+            ["DiagnosticsSettings"] = "Settings",
+            ["DiagnosticsRolloutIndexCache"] = "Rollout index cache",
+            ["DiagnosticsLog"] = "Log",
+            ["DiagnosticsNone"] = "(none)",
+            ["DiagnosticsNotChecked"] = "(not checked)",
+            ["DiagnosticsCopyAction"] = "Yes: copy diagnostics",
+            ["DiagnosticsOpenLogAction"] = "No: open log file",
+            ["DiagnosticsCloseAction"] = "Cancel: close",
+            ["RelativeMinutesSuffix"] = "m",
+            ["RelativeHoursSuffix"] = "h",
+            ["RelativeDaysSuffix"] = "d",
+            ["RelativeWeeksSuffix"] = "w",
+            ["RelativeMonthsSuffix"] = "mo",
+            ["RelativeYearsSuffix"] = "y",
             ["NoSelection"] = "No sessions selected.",
             ["User"] = "User",
             ["Assistant"] = "Assistant",
@@ -82,7 +109,7 @@ public sealed class LocalizationService : ObservableObject
         },
         ["ru"] = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["AppTitle"] = "Браузер сессий Codex",
+            ["AppTitle"] = "CodexHelper",
             ["Refresh"] = "Обновить",
             ["Elevate"] = "Поднять",
             ["Archive"] = "В архив",
@@ -113,7 +140,7 @@ public sealed class LocalizationService : ObservableObject
             ["UntitledThread"] = "Без названия",
             ["NoSession"] = "Выбери сессию, чтобы увидеть диалог.",
             ["NoMessages"] = "Для этой сессии не удалось получить сообщения для отображения.",
-            ["ConversationTruncated"] = "Показаны последние {0} из {1} сообщений.",
+            ["ConversationTruncated"] = "Показаны последние {0:N0} из {1:N0} сообщений.",
             ["Loading"] = "Загрузка...",
             ["Ready"] = "Готово",
             ["Active"] = "Активна",
@@ -135,16 +162,42 @@ public sealed class LocalizationService : ObservableObject
             ["NoParameters"] = "Параметры для этой сессии не найдены.",
             ["CodexCliMissing"] = "Codex CLI не найден в PATH. Установи Codex и проверь, что команда `codex` доступна из терминала.",
             ["CodexAppServerUnsupported"] = "Codex CLI установлен, но эта версия не поддерживает `codex app-server`. Обнови Codex CLI или установи версию с поддержкой app-server.",
-            ["ArchiveDone"] = "Архивировано сессий: {0}.",
-            ["ElevateDone"] = "Поднято сессий: {0}.",
-            ["RefreshDone"] = "Загружено сессий: {0}, проектов: {1}.",
-            ["ReadOnlyRefreshDone"] = "Загружено сессий из локальных rollout-файлов: {0}, проектов: {1}. Режим только чтения: архивация и поднятие недоступны.",
-            ["OperationPartialDone"] = "Выполнено сессий: {0}, с ошибкой: {1}. Последняя ошибка: {2}",
+            ["ArchiveDone"] = "Архивировано сессий: {0:N0}.",
+            ["ElevateDone"] = "Поднято сессий: {0:N0}.",
+            ["RefreshDone"] = "Загружено сессий: {0:N0}, проектов: {1:N0}.",
+            ["ReadOnlyRefreshDone"] = "Загружено сессий из локальных rollout-файлов: {0:N0}, проектов: {1:N0}. Режим только чтения: архивация и поднятие недоступны.",
+            ["OperationPartialDone"] = "Выполнено сессий: {0:N0}, с ошибкой: {1:N0}. Последняя ошибка: {2}",
             ["ReadOnlyOperationUnavailable"] = "Эта операция недоступна в режиме только чтения, потому что Codex app-server не запущен.",
             ["OperationFailed"] = "Операция не удалась: {0}",
             ["OpenFailed"] = "Не удалось прочитать сессию: {0}",
             ["LoadingSession"] = "Загружаю сессию...",
             ["LoadingDiagnostics"] = "Загружаю диагностику...",
+            ["DiagnosticsTitle"] = "Диагностика CodexHelper",
+            ["DiagnosticsMode"] = "Режим",
+            ["DiagnosticsModeReadOnly"] = "Только чтение",
+            ["DiagnosticsModeAppServer"] = "App-server",
+            ["DiagnosticsCodexProbe"] = "Проверка Codex",
+            ["DiagnosticsSelectedCodex"] = "Выбранный Codex",
+            ["DiagnosticsCodexCandidates"] = "Кандидаты Codex",
+            ["DiagnosticsCodexHome"] = "Домашняя папка Codex",
+            ["DiagnosticsSessions"] = "Сессии",
+            ["DiagnosticsArchivedSessions"] = "Архивные сессии",
+            ["DiagnosticsActiveRolloutFiles"] = "Активные rollout-файлы",
+            ["DiagnosticsArchivedRolloutFiles"] = "Архивные rollout-файлы",
+            ["DiagnosticsSettings"] = "Настройки",
+            ["DiagnosticsRolloutIndexCache"] = "Кэш индекса rollout",
+            ["DiagnosticsLog"] = "Лог",
+            ["DiagnosticsNone"] = "(нет)",
+            ["DiagnosticsNotChecked"] = "(не проверялось)",
+            ["DiagnosticsCopyAction"] = "Да: скопировать диагностику",
+            ["DiagnosticsOpenLogAction"] = "Нет: открыть лог-файл",
+            ["DiagnosticsCloseAction"] = "Отмена: закрыть",
+            ["RelativeMinutesSuffix"] = "мин",
+            ["RelativeHoursSuffix"] = "ч",
+            ["RelativeDaysSuffix"] = "д",
+            ["RelativeWeeksSuffix"] = "н",
+            ["RelativeMonthsSuffix"] = "мес",
+            ["RelativeYearsSuffix"] = "г",
             ["NoSelection"] = "Сессии не выбраны.",
             ["User"] = "Пользователь",
             ["Assistant"] = "Ассистент",
@@ -159,6 +212,8 @@ public sealed class LocalizationService : ObservableObject
     private string _language = "en";
 
     public event EventHandler? LanguageChanged;
+
+    public CultureInfo Culture => CultureInfo.CurrentCulture;
 
     public string Language
     {
@@ -185,5 +240,71 @@ public sealed class LocalizationService : ObservableObject
 
             return _strings["en"].TryGetValue(key, out var fallback) ? fallback : key;
         }
+    }
+
+    public string Format(string format, params object?[] args)
+    {
+        return string.Format(Culture, format, args);
+    }
+
+    public string FormatShortDateTime(DateTimeOffset value)
+    {
+        return value.LocalDateTime.ToString("g", Culture);
+    }
+
+    public string FormatShortDateTimeWithAge(DateTimeOffset value)
+    {
+        return $"{FormatShortDateTime(value)} ({FormatElapsedSince(value, DateTimeOffset.Now)})";
+    }
+
+    public string FormatLongDateTime(DateTimeOffset value)
+    {
+        return value.LocalDateTime.ToString("G", Culture);
+    }
+
+    public string FormatNumber(long value)
+    {
+        return value.ToString("N0", Culture);
+    }
+
+    public string FormatElapsedSince(DateTimeOffset value, DateTimeOffset now)
+    {
+        var elapsed = now - value;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        if (elapsed.TotalMinutes < 60)
+        {
+            return FormatRelativeAge((long)Math.Floor(elapsed.TotalMinutes), "RelativeMinutesSuffix");
+        }
+
+        if (elapsed.TotalHours < 24)
+        {
+            return FormatRelativeAge((long)Math.Floor(elapsed.TotalHours), "RelativeHoursSuffix");
+        }
+
+        if (elapsed.TotalDays < 7)
+        {
+            return FormatRelativeAge((long)Math.Floor(elapsed.TotalDays), "RelativeDaysSuffix");
+        }
+
+        if (elapsed.TotalDays < 30)
+        {
+            return FormatRelativeAge(Math.Max(1, (long)Math.Floor(elapsed.TotalDays / 7)), "RelativeWeeksSuffix");
+        }
+
+        if (elapsed.TotalDays < 365)
+        {
+            return FormatRelativeAge(Math.Max(1, (long)Math.Floor(elapsed.TotalDays / 30.436875)), "RelativeMonthsSuffix");
+        }
+
+        return FormatRelativeAge(Math.Max(1, (long)Math.Floor(elapsed.TotalDays / 365.2425)), "RelativeYearsSuffix");
+    }
+
+    private string FormatRelativeAge(long value, string suffixKey)
+    {
+        return $"{value.ToString("N0", Culture)}{this[suffixKey]}";
     }
 }

@@ -32,8 +32,8 @@ public sealed class AppSettingsService : IAppSettingsService
         try
         {
             using var stream = File.OpenRead(SettingsPath);
-            return JsonSerializer.Deserialize<AppSettings>(stream, JsonOptions)
-                ?? new AppSettings();
+            using var document = JsonDocument.Parse(stream);
+            return ReadSettings(document);
         }
         catch
         {
@@ -51,8 +51,8 @@ public sealed class AppSettingsService : IAppSettingsService
         try
         {
             await using var stream = File.OpenRead(SettingsPath);
-            return await JsonSerializer.DeserializeAsync<AppSettings>(stream, JsonOptions, cancellationToken)
-                ?? new AppSettings();
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            return ReadSettings(document);
         }
         catch
         {
@@ -63,7 +63,80 @@ public sealed class AppSettingsService : IAppSettingsService
     public async Task SaveAsync(AppSettings settings, CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(SettingsDirectory);
-        await using var stream = File.Create(SettingsPath);
-        await JsonSerializer.SerializeAsync(stream, settings, JsonOptions, cancellationToken);
+        var temporaryPath = Path.Combine(
+            SettingsDirectory,
+            $"{Path.GetFileName(SettingsPath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 16 * 1024,
+                FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(stream, settings, JsonOptions, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (File.Exists(SettingsPath))
+            {
+                File.Replace(temporaryPath, SettingsPath, destinationBackupFileName: null);
+            }
+            else
+            {
+                File.Move(temporaryPath, SettingsPath);
+            }
+        }
+        finally
+        {
+            TryDeleteFile(temporaryPath);
+        }
+    }
+
+    private static AppSettings ReadSettings(JsonDocument document)
+    {
+        var settings = JsonSerializer.Deserialize<AppSettings>(document.RootElement.GetRawText(), JsonOptions)
+            ?? new AppSettings();
+        settings.IsLanguageConfigured = HasConfiguredLanguage(document.RootElement);
+        return settings;
+    }
+
+    private static bool HasConfiguredLanguage(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var property in root.EnumerateObject())
+        {
+            if (!property.Name.Equals(nameof(AppSettings.Language), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return property.Value.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(property.Value.GetString());
+        }
+
+        return false;
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
     }
 }

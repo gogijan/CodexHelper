@@ -47,6 +47,10 @@ public sealed class MainViewModel : ObservableObject
     private string _developerInstructions = string.Empty;
     private string _userInstructions = string.Empty;
     private string _threadParameters = string.Empty;
+    private DateTimeOffset? _threadTimestamp;
+    private string? _threadModel;
+    private string? _threadEffort;
+    private long? _threadModelContextWindow;
 
     public MainViewModel()
         : this(
@@ -74,7 +78,7 @@ public sealed class MainViewModel : ObservableObject
         LanguageOptions =
         [
             new LanguageOption("en", "English"),
-            new LanguageOption("ru", "Русский")
+            new LanguageOption("ru", "Russian")
         ];
         UpdateThreadFilterOptions();
 
@@ -116,10 +120,12 @@ public sealed class MainViewModel : ObservableObject
         get => _selectedLanguageCode;
         set
         {
-            if (SetProperty(ref _selectedLanguageCode, value))
+            var normalized = NormalizeLanguageCode(value);
+            if (SetProperty(ref _selectedLanguageCode, normalized))
             {
-                _localization.Language = value;
-                _settings.Language = value;
+                _localization.Language = normalized;
+                _settings.Language = normalized;
+                _settings.IsLanguageConfigured = true;
                 _ = SaveSettingsAsync();
             }
         }
@@ -248,7 +254,7 @@ public sealed class MainViewModel : ObservableObject
 
     public int SelectedCount => _threads.Count(thread => thread.IsSelected);
 
-    public string SelectedSummary => $"{SelectedCount} {_localization["Selected"]}";
+    public string SelectedSummary => $"{_localization.FormatNumber(SelectedCount)} {_localization["Selected"]}";
 
     public string WindowTitle => _localization["AppTitle"];
 
@@ -324,6 +330,8 @@ public sealed class MainViewModel : ObservableObject
 
     public string LoadingSessionText => _localization["LoadingSession"];
 
+    public CultureInfo Culture => _localization.Culture;
+
     public double? SavedWindowWidth => _settings.WindowWidth;
 
     public double? SavedWindowHeight => _settings.WindowHeight;
@@ -380,8 +388,13 @@ public sealed class MainViewModel : ObservableObject
     private void ApplySettings()
     {
         _settingsLoaded = true;
-        _selectedLanguageCode = string.IsNullOrWhiteSpace(_settings.Language) ? "en" : _settings.Language;
+        _selectedLanguageCode = _settings.IsLanguageConfigured
+            ? NormalizeLanguageCode(_settings.Language)
+            : GetDefaultLanguageCode();
+        _settings.Language = _selectedLanguageCode;
+        _settings.IsLanguageConfigured = true;
         _localization.Language = _selectedLanguageCode;
+        StatusText = _localization["Ready"];
         OnPropertyChanged(nameof(SelectedLanguageCode));
     }
 
@@ -438,13 +451,13 @@ public sealed class MainViewModel : ObservableObject
             var message = GetDisplayErrorMessage(ex);
             ConversationMessages =
             [
-                new ConversationMessage("error", string.Format(_localization["OpenFailed"], message), ConversationMessageKind.Error)
+                new ConversationMessage("error", FormatLocalized("OpenFailed", message), ConversationMessageKind.Error)
             ];
             DeveloperInstructions = string.Empty;
             UserInstructions = string.Empty;
             ThreadParameters = string.Empty;
             ClearThreadParameterNodes();
-            StatusText = string.Format(_localization["OpenFailed"], message);
+            StatusText = FormatLocalized("OpenFailed", message);
         }
         finally
         {
@@ -497,6 +510,23 @@ public sealed class MainViewModel : ObservableObject
 
     public event EventHandler<DiagnosticsSnapshot>? DiagnosticsRequested;
 
+    public string GetLocalizedString(string key)
+    {
+        return _localization[key];
+    }
+
+    public string FormatLocalizedString(string key, params object?[] args)
+    {
+        return _localization.Format(_localization[key], args);
+    }
+
+    public string FormatMessageTimestamp(DateTimeOffset? timestamp)
+    {
+        return timestamp is { } value
+            ? _localization.FormatShortDateTime(value)
+            : string.Empty;
+    }
+
     public string GetRoleDisplayName(ConversationMessage message)
     {
         return message.Kind switch
@@ -516,8 +546,11 @@ public sealed class MainViewModel : ObservableObject
         ConversationMessages = details.Messages.Count > 0
             ? details.Messages
             : [new ConversationMessage("system", _localization["NoMessages"], ConversationMessageKind.System)];
-        ThreadTimestampText = details.Timestamp?.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss") ?? string.Empty;
-        ModelEffortText = FormatModelEffort(details.Model, details.Effort, details.ModelContextWindow);
+        _threadTimestamp = details.Timestamp;
+        _threadModel = details.Model;
+        _threadEffort = details.Effort;
+        _threadModelContextWindow = details.ModelContextWindow;
+        RefreshFormattedThreadDetails();
         DeveloperInstructions = details.DeveloperInstructions;
         UserInstructions = details.UserInstructions;
         ThreadParameters = details.Parameters;
@@ -582,13 +615,13 @@ public sealed class MainViewModel : ObservableObject
                 var message = GetDisplayErrorMessage(ex);
                 ConversationMessages =
                 [
-                    new ConversationMessage("error", string.Format(_localization["OpenFailed"], message), ConversationMessageKind.Error)
+                    new ConversationMessage("error", FormatLocalized("OpenFailed", message), ConversationMessageKind.Error)
                 ];
                 DeveloperInstructions = string.Empty;
                 UserInstructions = string.Empty;
                 ThreadParameters = string.Empty;
                 ClearThreadParameterNodes();
-                StatusText = string.Format(_localization["OpenFailed"], message);
+                StatusText = FormatLocalized("OpenFailed", message);
                 return;
             }
         }
@@ -686,8 +719,8 @@ public sealed class MainViewModel : ObservableObject
             if (!automatic)
             {
                 StatusText = IsReadOnlyMode
-                    ? string.Format(_localization["ReadOnlyRefreshDone"], _threads.Count, projectCount)
-                    : string.Format(_localization["RefreshDone"], _threads.Count, projectCount);
+                    ? FormatLocalized("ReadOnlyRefreshDone", _threads.Count, projectCount)
+                    : FormatLocalized("RefreshDone", _threads.Count, projectCount);
             }
 
             if (selectedThreadToRefresh is not null)
@@ -699,7 +732,7 @@ public sealed class MainViewModel : ObservableObject
         {
             if (!automatic)
             {
-                StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
+                StatusText = FormatLocalized("OperationFailed", GetDisplayErrorMessage(ex));
             }
         }
         finally
@@ -754,7 +787,7 @@ public sealed class MainViewModel : ObservableObject
                 requestId == _openThreadRequestId &&
                 ReferenceEquals(SelectedThread, thread))
             {
-                StatusText = string.Format(_localization["OpenFailed"], GetDisplayErrorMessage(ex));
+                StatusText = FormatLocalized("OpenFailed", GetDisplayErrorMessage(ex));
             }
         }
         finally
@@ -838,8 +871,8 @@ public sealed class MainViewModel : ObservableObject
             }
 
             StatusText = failed == 0
-                ? string.Format(successFormat, completed)
-                : string.Format(
+                ? _localization.Format(successFormat, completed)
+                : _localization.Format(
                     _localization["OperationPartialDone"],
                     completed,
                     failed,
@@ -850,7 +883,7 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
+            StatusText = FormatLocalized("OperationFailed", GetDisplayErrorMessage(ex));
         }
         finally
         {
@@ -1003,7 +1036,7 @@ public sealed class MainViewModel : ObservableObject
         IEnumerable<ThreadItemViewModel> threads,
         IReadOnlyDictionary<string, bool> projectExpansionState)
     {
-        var project = new ProjectNodeViewModel(key, displayName, fullPath, threads)
+        var project = new ProjectNodeViewModel(key, displayName, fullPath, threads, _localization)
         {
             IsExpanded = projectExpansionState.TryGetValue(key, out var isExpanded) && isExpanded,
             IsTreeSelected = IsCurrentProjectTreeItem(key)
@@ -1094,6 +1127,23 @@ public sealed class MainViewModel : ObservableObject
         return value is "all" or "active" or "archived" ? value : "active";
     }
 
+    private static string NormalizeLanguageCode(string? value)
+    {
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            "ru" => "ru",
+            "en" => "en",
+            _ => "en"
+        };
+    }
+
+    private static string GetDefaultLanguageCode()
+    {
+        return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName.Equals("ru", StringComparison.OrdinalIgnoreCase)
+            ? "ru"
+            : "en";
+    }
+
     private bool MatchesSearch(ThreadItemViewModel thread)
     {
         if (string.IsNullOrWhiteSpace(SearchText))
@@ -1158,7 +1208,28 @@ public sealed class MainViewModel : ObservableObject
             RebuildThreadParameterNodes();
         }
 
+        RefreshFormattedThreadDetails();
+        OnPropertyChanged(nameof(Culture));
+        OnPropertyChanged(nameof(ConversationMessages));
         RebuildProjects();
+    }
+
+    public void RefreshTimeDependentText()
+    {
+        if (_lifetime.IsCancellationRequested)
+        {
+            return;
+        }
+
+        foreach (var thread in _threads)
+        {
+            thread.RefreshTimeDependentText();
+        }
+
+        if (_threadTimestamp is not null)
+        {
+            RefreshFormattedThreadDetails();
+        }
     }
 
     private void OnThreadTreeChanged(object? sender, ThreadTreeChangedEventArgs e)
@@ -1232,7 +1303,7 @@ public sealed class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
+            StatusText = FormatLocalized("OperationFailed", GetDisplayErrorMessage(ex));
         }
         finally
         {
@@ -1244,19 +1315,16 @@ public sealed class MainViewModel : ObservableObject
     {
         _conversationMessages = Array.Empty<ConversationMessage>();
         OnPropertyChanged(nameof(ConversationMessages));
+        _threadTimestamp = null;
+        _threadModel = null;
+        _threadEffort = null;
+        _threadModelContextWindow = null;
         ThreadTimestampText = string.Empty;
         ModelEffortText = string.Empty;
         DeveloperInstructions = string.Empty;
         UserInstructions = string.Empty;
         ThreadParameters = string.Empty;
         ClearThreadParameterNodes();
-    }
-
-    public IReadOnlyList<ConversationMessage> TakeConversationMessagesForRender()
-    {
-        var messages = _conversationMessages;
-        _conversationMessages = Array.Empty<ConversationMessage>();
-        return messages;
     }
 
     private void RefreshLocalizedProperties()
@@ -1347,7 +1415,20 @@ public sealed class MainViewModel : ObservableObject
         };
     }
 
-    private static string FormatModelEffort(string? model, string? effort, long? modelContextWindow)
+    private string FormatLocalized(string key, params object?[] args)
+    {
+        return _localization.Format(_localization[key], args);
+    }
+
+    private void RefreshFormattedThreadDetails()
+    {
+        ThreadTimestampText = _threadTimestamp is { } timestamp
+            ? _localization.FormatShortDateTimeWithAge(timestamp)
+            : string.Empty;
+        ModelEffortText = FormatModelEffort(_threadModel, _threadEffort, _threadModelContextWindow);
+    }
+
+    private string FormatModelEffort(string? model, string? effort, long? modelContextWindow)
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(model))
@@ -1362,10 +1443,18 @@ public sealed class MainViewModel : ObservableObject
 
         if (modelContextWindow is > 0)
         {
-            parts.Add(modelContextWindow.Value.ToString("N0", CultureInfo.InvariantCulture));
+            parts.Add(FormatModelContextWindow(modelContextWindow.Value));
         }
 
         return string.Join(" ", parts);
+    }
+
+    private string FormatModelContextWindow(long modelContextWindow)
+    {
+        var thousands = Math.Max(
+            1,
+            (long)Math.Round(modelContextWindow / 1000d, MidpointRounding.AwayFromZero));
+        return $"{_localization.FormatNumber(thousands)}k";
     }
 
     private static bool IsFinite(double value)
