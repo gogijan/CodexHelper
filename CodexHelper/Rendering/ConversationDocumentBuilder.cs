@@ -74,6 +74,16 @@ public static class ConversationDocumentBuilder
         AddMessage(document, message, roleText);
     }
 
+    public static void AddNotice(FlowDocument document, string text)
+    {
+        document.Blocks.Add(new Paragraph(new Run(text))
+        {
+            Foreground = MutedText,
+            FontSize = 12,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+    }
+
     public static FlowDocument CreateText(string text, string placeholder)
     {
         var document = CreateDocument();

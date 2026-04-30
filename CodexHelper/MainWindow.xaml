@@ -225,10 +225,18 @@
                               Margin="0,0,3,3"
                               Padding="6,2,2,6"
                               ClipToBounds="True"
+                              ScrollViewer.CanContentScroll="True"
                               ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                               ScrollViewer.VerticalScrollBarVisibility="Auto"
+                              VirtualizingStackPanel.IsVirtualizing="True"
+                              VirtualizingStackPanel.VirtualizationMode="Recycling"
                               PreviewKeyDown="ProjectTree_PreviewKeyDown"
                               SelectedItemChanged="ProjectTree_SelectedItemChanged">
+                        <TreeView.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <VirtualizingStackPanel />
+                            </ItemsPanelTemplate>
+                        </TreeView.ItemsPanel>
                         <TreeView.Resources>
                             <Style x:Key="ProjectExpandToggleStyle" TargetType="ToggleButton">
                                 <Setter Property="Focusable" Value="False" />
@@ -544,8 +552,16 @@
                                       BorderThickness="0"
                                       Margin="0,0,2,0"
                                       Padding="16,12"
+                                      ScrollViewer.CanContentScroll="True"
+                                      VirtualizingStackPanel.IsVirtualizing="True"
+                                      VirtualizingStackPanel.VirtualizationMode="Recycling"
                                       KeyDown="ParametersTree_KeyDown"
                                       Visibility="{Binding IsChecked, ElementName=ParametersTabButton, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <TreeView.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <VirtualizingStackPanel />
+                                    </ItemsPanelTemplate>
+                                </TreeView.ItemsPanel>
                                 <TreeView.ContextMenu>
                                     <ContextMenu>
                                         <MenuItem Header="{Binding PlacementTarget.DataContext.CopyText, RelativeSource={RelativeSource AncestorType=ContextMenu}}"

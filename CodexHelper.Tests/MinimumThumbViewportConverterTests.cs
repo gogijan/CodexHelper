@@ -52,7 +52,16 @@ public sealed class MinimumThumbViewportConverterTests
     {
         var converter = new MinimumThumbViewportConverter();
 
-        Assert.ThrowsException<NotSupportedException>(() =>
-            converter.ConvertBack(1d, [typeof(double)], "20", CultureInfo.InvariantCulture));
+        var thrown = false;
+        try
+        {
+            converter.ConvertBack(1d, [typeof(double)], "20", CultureInfo.InvariantCulture);
+        }
+        catch (NotSupportedException)
+        {
+            thrown = true;
+        }
+
+        Assert.IsTrue(thrown);
     }
 }

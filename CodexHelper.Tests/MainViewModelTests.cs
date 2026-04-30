@@ -114,6 +114,51 @@ public sealed class MainViewModelTests
         await harness.ViewModel.ShutdownAsync();
     }
 
+    [TestMethod]
+    public async Task MonitorRefresh_ReloadsCurrentlyOpenThreadDetails()
+    {
+        var harness = CreateHarness();
+        await harness.ViewModel.InitializeAsync();
+        var alpha = harness.ViewModel.Projects[0].Threads.Single(thread => thread.Thread.Id == "alpha").Thread;
+        await harness.ViewModel.OpenThreadAsync(alpha);
+
+        harness.ThreadService.DetailsById["alpha"] = new ThreadDetails
+        {
+            Messages = [new ConversationMessage("assistant", "Updated after refresh", ConversationMessageKind.Assistant)],
+            Timestamp = DateTimeOffset.Parse("2026-04-30T12:06:00Z"),
+            Model = "gpt-5.4",
+            Effort = "medium",
+            Parameters = """{"id":"alpha","version":2}"""
+        };
+
+        harness.Monitor.RaiseChanged();
+
+        await TestWait.UntilAsync(() =>
+            harness.ViewModel.ConversationMessages.Any(message => message.Content == "Updated after refresh"));
+
+        Assert.IsTrue(harness.ThreadService.CacheInvalidated);
+        Assert.AreEqual("gpt-5.4 medium", harness.ViewModel.ModelEffortText);
+        Assert.AreSame(alpha, harness.ViewModel.SelectedThread);
+
+        await harness.ViewModel.ShutdownAsync();
+    }
+
+    [TestMethod]
+    public async Task MonitorRefresh_ForwardsChangedPathsToThreadService()
+    {
+        var harness = CreateHarness();
+        await harness.ViewModel.InitializeAsync();
+        var changedPath = @"C:\Users\tester\.codex\sessions\2026\05\01\rollout-thread-1.jsonl";
+
+        harness.Monitor.RaiseChanged(changedPath);
+
+        await TestWait.UntilAsync(() => harness.ThreadService.InvalidatedPaths.Count > 0);
+
+        CollectionAssert.AreEqual(new[] { changedPath }, harness.ThreadService.InvalidatedPaths.ToArray());
+
+        await harness.ViewModel.ShutdownAsync();
+    }
+
     private static MainViewModelHarness CreateHarness()
     {
         var threadService = new FakeCodexThreadService
@@ -221,6 +266,8 @@ public sealed class MainViewModelTests
 
         public bool CacheInvalidated { get; private set; }
 
+        public List<string> InvalidatedPaths { get; } = [];
+
         public Task<IReadOnlyList<CodexThread>> GetAllThreadsAsync(CancellationToken cancellationToken = default)
         {
             return Task.FromResult(Threads);
@@ -241,9 +288,14 @@ public sealed class MainViewModelTests
             return Task.CompletedTask;
         }
 
-        public void InvalidateCache()
+        public void InvalidateCache(IReadOnlyList<string>? changedPaths = null)
         {
             CacheInvalidated = true;
+            InvalidatedPaths.Clear();
+            if (changedPaths is not null)
+            {
+                InvalidatedPaths.AddRange(changedPaths);
+            }
         }
 
         public ValueTask DisposeAsync()
@@ -254,7 +306,7 @@ public sealed class MainViewModelTests
 
     private sealed class FakeThreadTreeMonitor : IThreadTreeMonitor
     {
-        public event EventHandler? Changed;
+        public event EventHandler<ThreadTreeChangedEventArgs>? Changed;
 
         public bool StartCalled { get; private set; }
 
@@ -263,9 +315,9 @@ public sealed class MainViewModelTests
             StartCalled = true;
         }
 
-        public void RaiseChanged()
+        public void RaiseChanged(params string[] changedPaths)
         {
-            Changed?.Invoke(this, EventArgs.Empty);
+            Changed?.Invoke(this, new ThreadTreeChangedEventArgs(requiresFullRefresh: false, changedPaths));
         }
 
         public void Dispose()

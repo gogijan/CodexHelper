@@ -112,9 +112,9 @@ public sealed class CodexThreadService : ICodexThreadService
             cancellationToken);
     }
 
-    public void InvalidateCache()
+    public void InvalidateCache(IReadOnlyList<string>? changedPaths = null)
     {
-        _rolloutReader.InvalidateCache();
+        _rolloutReader.InvalidateCache(changedPaths);
     }
 
     public ValueTask DisposeAsync()

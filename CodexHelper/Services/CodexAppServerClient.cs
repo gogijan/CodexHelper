@@ -14,15 +14,40 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    private readonly CodexCliLocator _cliLocator = new();
-    private readonly SemaphoreSlim _requestLock = new(1, 1);
-    private readonly TimeSpan _requestTimeout = TimeSpan.FromSeconds(45);
+    private readonly Func<CancellationToken, Task<CodexCliCommand>> _commandProvider;
+    private readonly Func<CodexCliCommand, ProcessStartInfo> _startInfoFactory;
+    private readonly SemaphoreSlim _processLock = new(1, 1);
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private readonly TimeSpan _requestTimeout;
     private readonly StringBuilder _stderr = new();
+    private readonly object _pendingGate = new();
+    private readonly Dictionary<int, PendingRequest> _pendingRequests = new();
 
     private Process? _process;
+    private CancellationTokenSource? _processCancellation;
+    private Task? _stdoutPump;
     private Task? _stderrPump;
-    private int _nextRequestId = 1;
+    private int _nextRequestId;
     private bool _initialized;
+    private bool _disposed;
+
+    public CodexAppServerClient()
+        : this(
+            cancellationToken => new CodexCliLocator().FindAppServerCommandAsync(cancellationToken),
+            command => CodexCliLocator.CreateStartInfo(command, redirectStandardInput: true),
+            TimeSpan.FromSeconds(45))
+    {
+    }
+
+    internal CodexAppServerClient(
+        Func<CancellationToken, Task<CodexCliCommand>> commandProvider,
+        Func<CodexCliCommand, ProcessStartInfo> startInfoFactory,
+        TimeSpan requestTimeout)
+    {
+        _commandProvider = commandProvider;
+        _startInfoFactory = startInfoFactory;
+        _requestTimeout = requestTimeout;
+    }
 
     public async Task<IReadOnlyList<CodexThread>> ListThreadsAsync(bool archived, CancellationToken cancellationToken = default)
     {
@@ -101,30 +126,10 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        try
-        {
-            if (_process is { HasExited: false })
-            {
-                try
-                {
-                    _process.StandardInput.Close();
-                }
-                catch
-                {
-                }
-
-                if (!_process.WaitForExit(3000))
-                {
-                    _process.Kill(entireProcessTree: true);
-                    await _process.WaitForExitAsync();
-                }
-            }
-        }
-        finally
-        {
-            _process?.Dispose();
-            _requestLock.Dispose();
-        }
+        _disposed = true;
+        await StopProcessAsync(new AppServerException("Codex app-server client was disposed."));
+        _processLock.Dispose();
+        _writeLock.Dispose();
     }
 
     private async Task SendCommandAsync(string method, string threadId, CancellationToken cancellationToken)
@@ -137,57 +142,65 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
     private async Task<JsonElement> SendRequestAsync(string method, object? parameters, CancellationToken cancellationToken)
     {
-        await _requestLock.WaitAsync(cancellationToken);
-        try
-        {
-            await EnsureStartedAsync(cancellationToken);
-            return await SendRequestCoreAsync(method, parameters, cancellationToken);
-        }
-        finally
-        {
-            _requestLock.Release();
-        }
+        await EnsureStartedAsync(cancellationToken);
+        return await SendRequestCoreAsync(method, parameters, cancellationToken);
     }
 
     private async Task EnsureStartedAsync(CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         if (_initialized && _process is { HasExited: false })
         {
             return;
         }
 
-        await StartProcessAsync(cancellationToken);
-
-        _ = await SendRequestCoreAsync(
-            "initialize",
-            new
+        await _processLock.WaitAsync(cancellationToken);
+        try
+        {
+            ThrowIfDisposed();
+            if (_initialized && _process is { HasExited: false })
             {
-                clientInfo = new
-                {
-                    name = "codex_helper",
-                    title = "CodexHelper",
-                    version = "0.1.0"
-                },
-                capabilities = new
-                {
-                    experimentalApi = true
-                }
-            },
-            cancellationToken);
+                return;
+            }
 
-        await SendNotificationAsync("initialized", cancellationToken);
-        _initialized = true;
+            await StopProcessCoreAsync(new AppServerException("Codex app-server process was restarted."));
+            await StartProcessCoreAsync(cancellationToken);
+
+            _ = await SendRequestCoreAsync(
+                "initialize",
+                new
+                {
+                    clientInfo = new
+                    {
+                        name = "codex_helper",
+                        title = "CodexHelper",
+                        version = "0.1.0"
+                    },
+                    capabilities = new
+                    {
+                        experimentalApi = true
+                    }
+                },
+                cancellationToken);
+
+            await SendNotificationAsync("initialized", cancellationToken);
+            _initialized = true;
+        }
+        catch
+        {
+            await StopProcessCoreAsync(new AppServerException("Codex app-server failed during initialization."));
+            throw;
+        }
+        finally
+        {
+            _processLock.Release();
+        }
     }
 
-    private async Task StartProcessAsync(CancellationToken cancellationToken)
+    private async Task StartProcessCoreAsync(CancellationToken cancellationToken)
     {
-        if (_process is { HasExited: false })
-        {
-            return;
-        }
-
-        var command = await _cliLocator.FindAppServerCommandAsync(cancellationToken);
-        var startInfo = CodexCliLocator.CreateStartInfo(command, redirectStandardInput: true);
+        var command = await _commandProvider(cancellationToken);
+        var startInfo = _startInfoFactory(command);
 
         var process = new Process
         {
@@ -210,13 +223,128 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         }
 
         _process = process;
+        _processCancellation = new CancellationTokenSource();
+        _initialized = false;
         _stderr.Clear();
         DiagnosticLogService.Info($"Started Codex app-server process {process.Id}.");
-        _stderrPump = Task.Run(async () =>
-        {
-            while (!process.HasExited)
+
+        _stdoutPump = Task.Run(() => PumpStandardOutputAsync(process, _processCancellation.Token));
+        _stderrPump = Task.Run(() => PumpStandardErrorAsync(process, _processCancellation.Token));
+    }
+
+    private async Task<JsonElement> SendRequestCoreAsync(string method, object? parameters, CancellationToken cancellationToken)
+    {
+        var id = Interlocked.Increment(ref _nextRequestId);
+        var payload = JsonSerializer.Serialize(
+            new
             {
-                var line = await process.StandardError.ReadLineAsync();
+                id,
+                method,
+                @params = parameters
+            },
+            JsonOptions);
+
+        var pending = new PendingRequest(id, method);
+        AddPendingRequest(pending);
+
+        using var timeout = new CancellationTokenSource(_requestTimeout);
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+        using var registration = linkedCancellation.Token.Register(
+            _ => CancelPendingRequest(id, method, cancellationToken.IsCancellationRequested),
+            null);
+
+        try
+        {
+            await WriteLineAsync(payload, cancellationToken);
+            return await pending.Task;
+        }
+        finally
+        {
+            RemovePendingRequest(id);
+        }
+    }
+
+    private async Task SendNotificationAsync(string method, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new { method }, JsonOptions);
+        await WriteLineAsync(payload, cancellationToken);
+    }
+
+    private async Task WriteLineAsync(string payload, CancellationToken cancellationToken)
+    {
+        await _writeLock.WaitAsync(cancellationToken);
+        try
+        {
+            var process = _process;
+            if (process is null || process.HasExited)
+            {
+                throw new AppServerException("codex app-server is not running.");
+            }
+
+            await process.StandardInput.WriteLineAsync(payload);
+            await process.StandardInput.FlushAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is not AppServerException)
+        {
+            DiagnosticLogService.Warning("Could not write to Codex app-server.", ex);
+            _ = StopProcessAsync(new AppServerException("Codex app-server stopped after a write failure.", ex));
+            throw new AppServerException("Could not write to codex app-server.", ex);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    private async Task PumpStandardOutputAsync(Process process, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var line = await process.StandardOutput.ReadLineAsync(cancellationToken);
+                if (line is null)
+                {
+                    break;
+                }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                HandleServerLine(line);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLogService.Warning("Codex app-server stdout reader failed.", ex);
+            CompleteAllPending(new AppServerException($"Codex app-server stdout reader failed. {GetStderrSuffix()}", ex));
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested && ReferenceEquals(_process, process))
+            {
+                _initialized = false;
+                CompleteAllPending(new AppServerException($"Codex app-server exited before responding. {GetStderrSuffix()}"));
+            }
+        }
+    }
+
+    private async Task PumpStandardErrorAsync(Process process, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var line = await process.StandardError.ReadLineAsync(cancellationToken);
                 if (line is null)
                 {
                     break;
@@ -232,82 +360,208 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
                 DiagnosticLogService.Warning($"Codex app-server stderr: {line}");
             }
-        });
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLogService.Warning("Codex app-server stderr reader failed.", ex);
+        }
+        finally
+        {
+            _ = process;
+        }
     }
 
-    private async Task<JsonElement> SendRequestCoreAsync(string method, object? parameters, CancellationToken cancellationToken)
+    private void HandleServerLine(string line)
     {
-        var process = _process ?? throw new AppServerException("codex app-server is not running.");
-        var id = _nextRequestId++;
-        var payload = JsonSerializer.Serialize(
-            new
-            {
-                id,
-                method,
-                @params = parameters
-            },
-            JsonOptions);
-
-        await process.StandardInput.WriteLineAsync(payload);
-        await process.StandardInput.FlushAsync(cancellationToken);
-
-        while (true)
+        try
         {
-            var line = await ReadLineWithTimeoutAsync(process, cancellationToken);
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
             using var document = JsonDocument.Parse(line);
             var root = document.RootElement;
-
-            if (!root.TryGetProperty("id", out var responseId) || responseId.GetInt32() != id)
+            if (!TryGetResponseId(root, out var id))
             {
-                continue;
+                return;
+            }
+
+            if (!TryRemovePendingRequest(id, out var pending))
+            {
+                return;
             }
 
             if (root.TryGetProperty("error", out var error))
             {
-                DiagnosticLogService.Warning($"Codex app-server returned error for {method}: {error.GetRawText()}");
-                throw new AppServerException($"app-server returned error for {method}: {error.GetRawText()}");
+                DiagnosticLogService.Warning($"Codex app-server returned error for {pending.Method}: {error.GetRawText()}");
+                pending.SetException(new AppServerException($"app-server returned error for {pending.Method}: {error.GetRawText()}"));
+                return;
             }
 
             if (root.TryGetProperty("result", out var result))
             {
-                return result.Clone();
+                pending.SetResult(result.Clone());
+                return;
             }
 
             using var empty = JsonDocument.Parse("{}");
-            return empty.RootElement.Clone();
+            pending.SetResult(empty.RootElement.Clone());
+        }
+        catch (JsonException ex)
+        {
+            DiagnosticLogService.Warning($"Ignoring invalid Codex app-server response line: {line}", ex);
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLogService.Warning("Could not handle Codex app-server response.", ex);
         }
     }
 
-    private async Task SendNotificationAsync(string method, CancellationToken cancellationToken)
+    private async Task StopProcessAsync(Exception pendingException)
     {
-        var process = _process ?? throw new AppServerException("codex app-server is not running.");
-        var payload = JsonSerializer.Serialize(new { method }, JsonOptions);
-        await process.StandardInput.WriteLineAsync(payload);
-        await process.StandardInput.FlushAsync(cancellationToken);
+        await _processLock.WaitAsync();
+        try
+        {
+            await StopProcessCoreAsync(pendingException);
+        }
+        finally
+        {
+            _processLock.Release();
+        }
     }
 
-    private async Task<string?> ReadLineWithTimeoutAsync(Process process, CancellationToken cancellationToken)
+    private async Task StopProcessCoreAsync(Exception pendingException)
     {
-        var readTask = process.StandardOutput.ReadLineAsync();
-        var timeoutTask = Task.Delay(_requestTimeout, cancellationToken);
-        var completed = await Task.WhenAny(readTask, timeoutTask);
-        if (completed == timeoutTask)
+        var process = _process;
+        var cancellation = _processCancellation;
+        var stdoutPump = _stdoutPump;
+        var stderrPump = _stderrPump;
+
+        _process = null;
+        _processCancellation = null;
+        _stdoutPump = null;
+        _stderrPump = null;
+        _initialized = false;
+
+        cancellation?.Cancel();
+        CompleteAllPending(pendingException);
+
+        if (process is null)
         {
-            throw new AppServerException($"Timed out waiting for Codex app-server. Make sure `codex app-server` can start successfully. {GetStderrSuffix()}");
+            cancellation?.Dispose();
+            return;
         }
 
-        var line = await readTask;
-        if (line is null)
+        try
         {
-            throw new AppServerException($"Codex app-server exited before responding. Make sure your Codex CLI supports `codex app-server --listen stdio://`. {GetStderrSuffix()}");
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.StandardInput.Close();
+                }
+                catch
+                {
+                }
+
+                if (!process.WaitForExit(3000))
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync();
+                }
+            }
+
+            await WaitForPumpAsync(stdoutPump);
+            await WaitForPumpAsync(stderrPump);
+        }
+        finally
+        {
+            process.Dispose();
+            cancellation?.Dispose();
+        }
+    }
+
+    private static async Task WaitForPumpAsync(Task? pump)
+    {
+        if (pump is null)
+        {
+            return;
         }
 
-        return line;
+        try
+        {
+            await pump;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch
+        {
+        }
+    }
+
+    private void AddPendingRequest(PendingRequest pending)
+    {
+        lock (_pendingGate)
+        {
+            _pendingRequests[pending.Id] = pending;
+        }
+    }
+
+    private void RemovePendingRequest(int id)
+    {
+        lock (_pendingGate)
+        {
+            _pendingRequests.Remove(id);
+        }
+    }
+
+    private bool TryRemovePendingRequest(int id, out PendingRequest pending)
+    {
+        lock (_pendingGate)
+        {
+            if (_pendingRequests.TryGetValue(id, out pending!))
+            {
+                _pendingRequests.Remove(id);
+                return true;
+            }
+        }
+
+        pending = null!;
+        return false;
+    }
+
+    private void CancelPendingRequest(int id, string method, bool callerCanceled)
+    {
+        if (!TryRemovePendingRequest(id, out var pending))
+        {
+            return;
+        }
+
+        if (callerCanceled)
+        {
+            pending.SetCanceled();
+            return;
+        }
+
+        var exception = new AppServerException($"Timed out waiting for Codex app-server response to {method}. {GetStderrSuffix()}");
+        _initialized = false;
+        pending.SetException(exception);
+        _ = StopProcessAsync(exception);
+    }
+
+    private void CompleteAllPending(Exception exception)
+    {
+        PendingRequest[] pending;
+        lock (_pendingGate)
+        {
+            pending = _pendingRequests.Values.ToArray();
+            _pendingRequests.Clear();
+        }
+
+        foreach (var request in pending)
+        {
+            request.SetException(exception);
+        }
     }
 
     private string GetStderrSuffix()
@@ -321,6 +575,30 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
             return $"stderr: {_stderr}";
         }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed)
+        {
+            throw new ObjectDisposedException(nameof(CodexAppServerClient));
+        }
+    }
+
+    private static bool TryGetResponseId(JsonElement element, out int id)
+    {
+        id = 0;
+        if (!element.TryGetProperty("id", out var value))
+        {
+            return false;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number => value.TryGetInt32(out id),
+            JsonValueKind.String => int.TryParse(value.GetString(), out id),
+            _ => false
+        };
     }
 
     private static DateTimeOffset? TryGetUnixTime(JsonElement element, string propertyName)
@@ -387,4 +665,35 @@ public sealed class CodexAppServerClient : IAsyncDisposable
             char.IsDigit(value[9]);
     }
 
+    private sealed class PendingRequest
+    {
+        private readonly TaskCompletionSource<JsonElement> _completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public PendingRequest(int id, string method)
+        {
+            Id = id;
+            Method = method;
+        }
+
+        public int Id { get; }
+
+        public string Method { get; }
+
+        public Task<JsonElement> Task => _completion.Task;
+
+        public void SetResult(JsonElement result)
+        {
+            _completion.TrySetResult(result);
+        }
+
+        public void SetException(Exception exception)
+        {
+            _completion.TrySetException(exception);
+        }
+
+        public void SetCanceled()
+        {
+            _completion.TrySetCanceled();
+        }
+    }
 }

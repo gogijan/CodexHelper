@@ -14,5 +14,5 @@ public interface ICodexThreadService : IAsyncDisposable
 
     Task ArchiveAsync(CodexThread thread, CancellationToken cancellationToken = default);
 
-    void InvalidateCache();
+    void InvalidateCache(IReadOnlyList<string>? changedPaths = null);
 }

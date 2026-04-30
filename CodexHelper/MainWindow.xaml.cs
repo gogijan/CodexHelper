@@ -17,6 +17,7 @@ namespace CodexHelper;
 public partial class MainWindow : Window
 {
     private const int ConversationRenderBatchSize = 12;
+    private const int ConversationRenderMessageLimit = 500;
     private const double ProjectPaneMaximumWindowFraction = 0.5;
 
     private readonly MainViewModel _viewModel = new();
@@ -544,12 +545,22 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var messagesToRender = messages;
+            if (messages.Count > ConversationRenderMessageLimit)
+            {
+                var skipped = messages.Count - ConversationRenderMessageLimit;
+                messagesToRender = messages.Skip(skipped).ToArray();
+                ConversationDocumentBuilder.AddNotice(
+                    _conversationDocument,
+                    string.Format(_viewModel.ConversationTruncatedText, messagesToRender.Count, messages.Count));
+            }
+
             ScrollToHome(ConversationViewer);
             var batchStopwatch = Stopwatch.StartNew();
-            for (var index = 0; index < messages.Count; index++)
+            for (var index = 0; index < messagesToRender.Count; index++)
             {
                 token.ThrowIfCancellationRequested();
-                var message = messages[index];
+                var message = messagesToRender[index];
                 ConversationDocumentBuilder.AddConversationMessage(
                     _conversationDocument,
                     message,

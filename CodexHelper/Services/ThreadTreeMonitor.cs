@@ -7,6 +7,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
     private static readonly TimeSpan DebounceInterval = TimeSpan.FromMilliseconds(1200);
     private readonly object _gate = new();
     private readonly List<FileSystemWatcher> _watchers = new();
+    private readonly HashSet<string> _changedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Timer _debounceTimer;
     private bool _disposed;
     private bool _rebuildWatchersOnTick;
@@ -16,7 +17,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
         _debounceTimer = new Timer(OnDebounceElapsed);
     }
 
-    public event EventHandler? Changed;
+    public event EventHandler<ThreadTreeChangedEventArgs>? Changed;
 
     public void Start()
     {
@@ -134,7 +135,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
     {
         if (IsRolloutFile(e.FullPath))
         {
-            ScheduleChanged(rebuildWatchers: false);
+            ScheduleChanged(rebuildWatchers: false, e.FullPath);
         }
     }
 
@@ -142,7 +143,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
     {
         if (IsRolloutFile(e.FullPath) || IsRolloutFile(e.OldFullPath))
         {
-            ScheduleChanged(rebuildWatchers: false);
+            ScheduleChanged(rebuildWatchers: false, e.FullPath, e.OldFullPath);
         }
     }
 
@@ -151,7 +152,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
         ScheduleChanged(rebuildWatchers: true);
     }
 
-    private void ScheduleChanged(bool rebuildWatchers)
+    private void ScheduleChanged(bool rebuildWatchers, params string[] changedPaths)
     {
         lock (_gate)
         {
@@ -161,6 +162,14 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
             }
 
             _rebuildWatchersOnTick |= rebuildWatchers;
+            if (!rebuildWatchers)
+            {
+                foreach (var path in changedPaths.Where(IsRolloutFile))
+                {
+                    _changedPaths.Add(path);
+                }
+            }
+
             _debounceTimer.Change(DebounceInterval, Timeout.InfiniteTimeSpan);
         }
     }
@@ -168,6 +177,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
     private void OnDebounceElapsed(object? state)
     {
         bool rebuildWatchers;
+        string[] changedPaths;
         lock (_gate)
         {
             if (_disposed)
@@ -177,6 +187,8 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
 
             rebuildWatchers = _rebuildWatchersOnTick;
             _rebuildWatchersOnTick = false;
+            changedPaths = _changedPaths.ToArray();
+            _changedPaths.Clear();
         }
 
         if (rebuildWatchers)
@@ -184,7 +196,7 @@ public sealed class ThreadTreeMonitor : IThreadTreeMonitor
             RebuildWatchers();
         }
 
-        Changed?.Invoke(this, EventArgs.Empty);
+        Changed?.Invoke(this, new ThreadTreeChangedEventArgs(rebuildWatchers, changedPaths));
     }
 
     private static string GetCodexHome()

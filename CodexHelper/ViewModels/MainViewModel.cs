@@ -294,6 +294,8 @@ public sealed class MainViewModel : ObservableObject
 
     public string NoMessagesText => _localization["NoMessages"];
 
+    public string ConversationTruncatedText => _localization["ConversationTruncated"];
+
     public string UpdatedText => _localization["Updated"];
 
     public string TimestampText => _localization["Timestamp"];
@@ -509,7 +511,7 @@ public sealed class MainViewModel : ObservableObject
         };
     }
 
-    private void ApplyThreadDetails(ThreadItemViewModel thread, ThreadDetails details)
+    private void ApplyThreadDetails(ThreadItemViewModel thread, ThreadDetails details, bool updateStatus = true)
     {
         ConversationMessages = details.Messages.Count > 0
             ? details.Messages
@@ -519,7 +521,10 @@ public sealed class MainViewModel : ObservableObject
         DeveloperInstructions = details.DeveloperInstructions;
         UserInstructions = details.UserInstructions;
         ThreadParameters = details.Parameters;
-        StatusText = thread.Name;
+        if (updateStatus)
+        {
+            StatusText = thread.Name;
+        }
     }
 
     private async Task WaitForLockedThreadAsync(
@@ -609,6 +614,7 @@ public sealed class MainViewModel : ObservableObject
         _isRefreshingThreads = true;
         IsTreeLoading = true;
         var previousSelectedId = preserveSelection ? SelectedThread?.Id : null;
+        ThreadItemViewModel? selectedThreadToRefresh = null;
         if (!preserveSelection)
         {
             _selectedThreadIds.Clear();
@@ -659,6 +665,7 @@ public sealed class MainViewModel : ObservableObject
                 if (selectedThread is not null)
                 {
                     SelectedThread = selectedThread;
+                    selectedThreadToRefresh = selectedThread;
                 }
                 else
                 {
@@ -682,6 +689,11 @@ public sealed class MainViewModel : ObservableObject
                     ? string.Format(_localization["ReadOnlyRefreshDone"], _threads.Count, projectCount)
                     : string.Format(_localization["RefreshDone"], _threads.Count, projectCount);
             }
+
+            if (selectedThreadToRefresh is not null)
+            {
+                await RefreshSelectedThreadDetailsAsync(selectedThreadToRefresh, automatic);
+            }
         }
         catch (Exception ex)
         {
@@ -697,6 +709,61 @@ public sealed class MainViewModel : ObservableObject
             IsBusy = false;
             RefreshSelectionState();
             RunPendingAutoRefreshIfIdle();
+        }
+    }
+
+    private async Task RefreshSelectedThreadDetailsAsync(ThreadItemViewModel thread, bool automatic)
+    {
+        var requestId = Interlocked.Increment(ref _openThreadRequestId);
+        var loadCancellation = CreateThreadLoadCancellation();
+        IsThreadLoading = true;
+
+        try
+        {
+            var details = await Task.Run(
+                () => _threadService.ReadDetailsAsync(thread.Model, loadCancellation.Token),
+                loadCancellation.Token);
+
+            if (requestId != _openThreadRequestId || !ReferenceEquals(SelectedThread, thread))
+            {
+                return;
+            }
+
+            thread.SetOpenInCodex(false);
+            ApplyThreadDetails(thread, details, updateStatus: false);
+        }
+        catch (ThreadFileLockedException)
+        {
+            if (requestId != _openThreadRequestId || !ReferenceEquals(SelectedThread, thread))
+            {
+                return;
+            }
+
+            thread.SetOpenInCodex(true);
+            if (!automatic)
+            {
+                StatusText = _localization["ThreadOpenInCodex"];
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!automatic &&
+                requestId == _openThreadRequestId &&
+                ReferenceEquals(SelectedThread, thread))
+            {
+                StatusText = string.Format(_localization["OpenFailed"], GetDisplayErrorMessage(ex));
+            }
+        }
+        finally
+        {
+            ReleaseThreadLoadCancellation(loadCancellation);
+            if (requestId == _openThreadRequestId && ReferenceEquals(SelectedThread, thread))
+            {
+                IsThreadLoading = false;
+            }
         }
     }
 
@@ -1094,14 +1161,14 @@ public sealed class MainViewModel : ObservableObject
         RebuildProjects();
     }
 
-    private void OnThreadTreeChanged(object? sender, EventArgs e)
+    private void OnThreadTreeChanged(object? sender, ThreadTreeChangedEventArgs e)
     {
         if (_lifetime.IsCancellationRequested)
         {
             return;
         }
 
-        _threadService.InvalidateCache();
+        _threadService.InvalidateCache(e.RequiresFullRefresh ? null : e.ChangedPaths);
         if (_uiContext is not null)
         {
             _uiContext.Post(_ => QueueAutoRefresh(), null);
@@ -1216,6 +1283,7 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(LanguageText));
         OnPropertyChanged(nameof(NoSessionText));
         OnPropertyChanged(nameof(NoMessagesText));
+        OnPropertyChanged(nameof(ConversationTruncatedText));
         OnPropertyChanged(nameof(UpdatedText));
         OnPropertyChanged(nameof(TimestampText));
         OnPropertyChanged(nameof(ModelEffortLabelText));

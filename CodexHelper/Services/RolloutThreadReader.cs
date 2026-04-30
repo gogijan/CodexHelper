@@ -22,6 +22,8 @@ public sealed class RolloutThreadReader
     public static string CachePath { get; } = Path.Combine(CacheDirectory, "rollout-index.json");
 
     private readonly SemaphoreSlim _indexLock = new(1, 1);
+    private readonly object _invalidationGate = new();
+    private readonly HashSet<string> _pendingChangedPaths = new(StringComparer.OrdinalIgnoreCase);
     private RolloutIndex? _index;
 
     public async Task<IReadOnlyList<CodexThread>> GetAllThreadsAsync(CancellationToken cancellationToken = default)
@@ -29,9 +31,27 @@ public sealed class RolloutThreadReader
         return (await EnsureIndexAsync(cancellationToken)).Threads;
     }
 
-    public void InvalidateCache()
+    public void InvalidateCache(IReadOnlyList<string>? changedPaths = null)
     {
-        _index = null;
+        lock (_invalidationGate)
+        {
+            if (changedPaths is null)
+            {
+                _pendingChangedPaths.Clear();
+                _index = null;
+                return;
+            }
+
+            if (changedPaths.Count == 0 || _index is null)
+            {
+                return;
+            }
+
+            foreach (var path in changedPaths.Where(IsRolloutFile))
+            {
+                _pendingChangedPaths.Add(path);
+            }
+        }
     }
 
     public async Task<ThreadDetails> TryReadDetailsAsync(
@@ -193,7 +213,7 @@ public sealed class RolloutThreadReader
 
     private async Task<RolloutIndex> EnsureIndexAsync(CancellationToken cancellationToken)
     {
-        if (_index is { } existing)
+        if (_index is { } existing && !HasPendingChangedPaths())
         {
             return existing;
         }
@@ -203,7 +223,14 @@ public sealed class RolloutThreadReader
         {
             if (_index is { } lockedExisting)
             {
-                return lockedExisting;
+                var changedPaths = TakePendingChangedPaths();
+                if (changedPaths.Count == 0)
+                {
+                    return lockedExisting;
+                }
+
+                _index = await ApplyIndexChangesAsync(lockedExisting, changedPaths, cancellationToken);
+                return _index;
             }
 
             _index = await BuildIndexAsync(cancellationToken);
@@ -215,10 +242,32 @@ public sealed class RolloutThreadReader
         }
     }
 
+    private bool HasPendingChangedPaths()
+    {
+        lock (_invalidationGate)
+        {
+            return _pendingChangedPaths.Count > 0;
+        }
+    }
+
+    private IReadOnlyList<string> TakePendingChangedPaths()
+    {
+        lock (_invalidationGate)
+        {
+            if (_pendingChangedPaths.Count == 0)
+            {
+                return Array.Empty<string>();
+            }
+
+            var changedPaths = _pendingChangedPaths.ToArray();
+            _pendingChangedPaths.Clear();
+            return changedPaths;
+        }
+    }
+
     private static async Task<RolloutIndex> BuildIndexAsync(CancellationToken cancellationToken)
     {
-        var entries = new List<CodexThread>();
-        var pathsByThreadId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var entriesByPath = new Dictionary<string, CodexThread>(StringComparer.OrdinalIgnoreCase);
         var cacheEntries = new List<RolloutIndexCacheEntry>();
         var cachedEntries = LoadDiskCache()
             .Entries
@@ -226,21 +275,14 @@ public sealed class RolloutThreadReader
             .GroupBy(entry => entry.Path, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
 
-        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var roots = new[]
-        {
-            (Path: Path.Combine(userProfile, ".codex", "sessions"), Archived: false),
-            (Path: Path.Combine(userProfile, ".codex", "archived_sessions"), Archived: true)
-        };
-
-        foreach (var root in roots)
+        foreach (var root in GetSessionRoots())
         {
             if (!Directory.Exists(root.Path))
             {
                 continue;
             }
 
-            foreach (var file in Directory.EnumerateFiles(root.Path, "rollout-*.jsonl", SearchOption.AllDirectories))
+            foreach (var file in EnumerateRolloutFiles(root.Path, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -252,24 +294,57 @@ public sealed class RolloutThreadReader
                     continue;
                 }
 
-                entries.Add(thread);
+                entriesByPath[file] = thread;
                 cacheEntries.Add(CreateCacheEntry(thread, fileInfo));
-                if (!string.IsNullOrWhiteSpace(thread.Id))
-                {
-                    pathsByThreadId[thread.Id] = file;
-                }
             }
         }
 
-        var threads = entries
-            .GroupBy(thread => thread.Id, StringComparer.OrdinalIgnoreCase)
-            .Select(group => group.OrderBy(thread => thread.IsArchived).First())
-            .OrderByDescending(thread => thread.UpdatedAt)
-            .ToArray();
-
         SaveDiskCache(cacheEntries);
-        DiagnosticLogService.Info($"Built rollout index with {threads.Length} thread(s).");
-        return new RolloutIndex(threads, pathsByThreadId);
+        var index = CreateIndex(entriesByPath);
+        DiagnosticLogService.Info($"Built rollout index with {index.Threads.Count} thread(s).");
+        return index;
+    }
+
+    private static async Task<RolloutIndex> ApplyIndexChangesAsync(
+        RolloutIndex current,
+        IReadOnlyList<string> changedPaths,
+        CancellationToken cancellationToken)
+    {
+        var entriesByPath = new Dictionary<string, CodexThread>(
+            current.EntriesByPath,
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in changedPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsRolloutFile(path))
+            {
+                continue;
+            }
+
+            entriesByPath.Remove(path);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            var root = FindSessionRoot(path);
+            if (root is null)
+            {
+                continue;
+            }
+
+            var thread = await TryReadIndexThreadAsync(path, root.Archived, cancellationToken);
+            if (thread is not null)
+            {
+                entriesByPath[path] = thread;
+            }
+        }
+
+        var index = CreateIndex(entriesByPath);
+        SaveDiskCache(CreateCacheEntries(index.EntriesByPath));
+        DiagnosticLogService.Info($"Updated rollout index incrementally for {changedPaths.Count} changed path(s).");
+        return index;
     }
 
     private static RolloutIndexCache LoadDiskCache()
@@ -310,6 +385,142 @@ public sealed class RolloutThreadReader
         catch (Exception ex)
         {
             DiagnosticLogService.Warning($"Could not write rollout index cache '{CachePath}'.", ex);
+        }
+    }
+
+    private static RolloutIndex CreateIndex(IReadOnlyDictionary<string, CodexThread> entriesByPath)
+    {
+        var threads = entriesByPath.Values
+            .GroupBy(thread => thread.Id, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.OrderBy(thread => thread.IsArchived).First())
+            .OrderByDescending(thread => thread.UpdatedAt)
+            .ToArray();
+
+        var pathsByThreadId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var thread in threads)
+        {
+            if (!string.IsNullOrWhiteSpace(thread.Id) &&
+                !string.IsNullOrWhiteSpace(thread.Path))
+            {
+                pathsByThreadId[thread.Id] = thread.Path;
+            }
+        }
+
+        return new RolloutIndex(
+            threads,
+            pathsByThreadId,
+            new Dictionary<string, CodexThread>(entriesByPath, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyList<RolloutIndexCacheEntry> CreateCacheEntries(
+        IReadOnlyDictionary<string, CodexThread> entriesByPath)
+    {
+        var entries = new List<RolloutIndexCacheEntry>(entriesByPath.Count);
+        foreach (var (path, thread) in entriesByPath)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    entries.Add(CreateCacheEntry(thread, new FileInfo(path)));
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLogService.Warning($"Could not cache rollout index entry for '{path}'.", ex);
+            }
+        }
+
+        return entries;
+    }
+
+    private static IReadOnlyList<SessionRoot> GetSessionRoots()
+    {
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var codexHome = Path.Combine(userProfile, ".codex");
+        return
+        [
+            new SessionRoot(Path.Combine(codexHome, "sessions"), Archived: false),
+            new SessionRoot(Path.Combine(codexHome, "archived_sessions"), Archived: true)
+        ];
+    }
+
+    private static SessionRoot? FindSessionRoot(string path)
+    {
+        foreach (var root in GetSessionRoots().OrderByDescending(root => root.Path.Length))
+        {
+            if (IsPathUnderRoot(path, root.Path))
+            {
+                return root;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsPathUnderRoot(string path, string root)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var fullRoot = Path.GetFullPath(root)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+
+            return fullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateRolloutFiles(string root, CancellationToken cancellationToken)
+    {
+        var pending = new Stack<string>();
+        pending.Push(root);
+
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var directory = pending.Pop();
+
+            foreach (var file in EnumerateFilesSafe(directory))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return file;
+            }
+
+            foreach (var childDirectory in EnumerateDirectoriesSafe(directory))
+            {
+                pending.Push(childDirectory);
+            }
+        }
+    }
+
+    private static IReadOnlyList<string> EnumerateFilesSafe(string directory)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(directory, "rollout-*.jsonl", SearchOption.TopDirectoryOnly).ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            DiagnosticLogService.Warning($"Could not enumerate rollout files under '{directory}'.", ex);
+            return Array.Empty<string>();
+        }
+    }
+
+    private static IReadOnlyList<string> EnumerateDirectoriesSafe(string directory)
+    {
+        try
+        {
+            return Directory.EnumerateDirectories(directory).ToArray();
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            DiagnosticLogService.Warning($"Could not enumerate rollout subdirectories under '{directory}'.", ex);
+            return Array.Empty<string>();
         }
     }
 
@@ -420,9 +631,10 @@ public sealed class RolloutThreadReader
                 }
             }
         }
-        catch (ThreadFileLockedException)
+        catch (ThreadFileLockedException ex)
         {
-            throw;
+            DiagnosticLogService.Warning($"Could not index locked rollout file '{file}'.", ex);
+            return null;
         }
         catch (Exception ex)
         {
@@ -557,6 +769,13 @@ public sealed class RolloutThreadReader
             char.IsDigit(value[9]);
     }
 
+    private static bool IsRolloutFile(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        return fileName.StartsWith("rollout-", StringComparison.OrdinalIgnoreCase) &&
+            fileName.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static JsonNode? SanitizeJson(JsonElement element)
     {
         var node = JsonNode.Parse(element.GetRawText());
@@ -635,7 +854,10 @@ public sealed class RolloutThreadReader
 
     private sealed record RolloutIndex(
         IReadOnlyList<CodexThread> Threads,
-        IReadOnlyDictionary<string, string> PathsByThreadId);
+        IReadOnlyDictionary<string, string> PathsByThreadId,
+        IReadOnlyDictionary<string, CodexThread> EntriesByPath);
+
+    private sealed record SessionRoot(string Path, bool Archived);
 
     private sealed class RolloutIndexCache
     {
