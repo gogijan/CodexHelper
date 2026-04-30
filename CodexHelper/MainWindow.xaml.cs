@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -8,6 +9,7 @@ using System.Windows.Threading;
 using System.Runtime;
 using CodexHelper.Models;
 using CodexHelper.Rendering;
+using CodexHelper.Services;
 using CodexHelper.ViewModels;
 
 namespace CodexHelper;
@@ -51,6 +53,7 @@ public partial class MainWindow : Window
         UserInstructionsViewer.Document = _userInstructionsDocument;
         DataContext = _viewModel;
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
+        _viewModel.DiagnosticsRequested += OnDiagnosticsRequested;
         UpdateAllDocuments();
     }
 
@@ -75,6 +78,7 @@ public partial class MainWindow : Window
         SizeChanged -= Window_SizeChanged;
         StateChanged -= Window_StateChanged;
         _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        _viewModel.DiagnosticsRequested -= OnDiagnosticsRequested;
         ClearViewerDocument(ConversationViewer, _conversationDocument);
         ClearViewerDocument(DeveloperInstructionsViewer, _developerInstructionsDocument);
         ClearViewerDocument(UserInstructionsViewer, _userInstructionsDocument);
@@ -140,6 +144,85 @@ public partial class MainWindow : Window
             _ = Dispatcher.BeginInvoke(
                 DispatcherPriority.ApplicationIdle,
                 new Action(TrackNormalWindowSize));
+        }
+    }
+
+    private void OnDiagnosticsRequested(object? sender, DiagnosticsSnapshot snapshot)
+    {
+        var text = BuildDiagnosticsText(snapshot);
+        var result = MessageBox.Show(
+            this,
+            text,
+            _viewModel.DiagnosticsText,
+            MessageBoxButton.YesNoCancel,
+            MessageBoxImage.Information,
+            MessageBoxResult.Cancel);
+
+        if (result == MessageBoxResult.Yes)
+        {
+            try
+            {
+                Clipboard.SetText(text);
+            }
+            catch
+            {
+            }
+        }
+        else if (result == MessageBoxResult.No)
+        {
+            OpenPath(snapshot.LogPath);
+        }
+    }
+
+    private static string BuildDiagnosticsText(DiagnosticsSnapshot snapshot)
+    {
+        var candidates = snapshot.CodexCandidates.Count == 0
+            ? "(none)"
+            : string.Join(Environment.NewLine, snapshot.CodexCandidates.Select(candidate => $"  - {candidate}"));
+
+        return string.Join(
+            Environment.NewLine,
+            "CodexHelper diagnostics",
+            "",
+            $"Mode: {snapshot.Mode}",
+            $"Codex probe: {snapshot.CodexProbeStatus ?? "(not checked)"}",
+            $"Selected Codex: {snapshot.SelectedCodexPath ?? "(none)"}",
+            "Codex candidates:",
+            candidates,
+            "",
+            $"Codex home: {snapshot.CodexHome}",
+            $"Sessions: {snapshot.SessionsRoot}",
+            $"Archived sessions: {snapshot.ArchivedSessionsRoot}",
+            $"Active rollout files: {snapshot.ActiveRolloutFileCount}",
+            $"Archived rollout files: {snapshot.ArchivedRolloutFileCount}",
+            "",
+            $"Settings: {snapshot.SettingsPath}",
+            $"Rollout index cache: {snapshot.RolloutIndexCachePath}",
+            $"Log: {snapshot.LogPath}",
+            "",
+            "Yes: copy diagnostics",
+            "No: open log file",
+            "Cancel: close");
+    }
+
+    private static void OpenPath(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? string.Empty);
+                File.AppendAllText(path, string.Empty);
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
         }
     }
 

@@ -4,16 +4,21 @@ using CodexHelper.Models;
 
 namespace CodexHelper.Services;
 
-public sealed class AppSettingsService
+public sealed class AppSettingsService : IAppSettingsService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
     };
 
-    public string SettingsDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "CodexHelper");
+    public AppSettingsService(string? settingsDirectory = null)
+    {
+        SettingsDirectory = settingsDirectory ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CodexHelper");
+    }
+
+    public string SettingsDirectory { get; }
 
     public string SettingsPath => Path.Combine(SettingsDirectory, "settings.json");
 

@@ -12,10 +12,11 @@ public sealed class MainViewModel : ObservableObject
     private const string ProjectTreeItemKeyPrefix = "project:";
     private const string ThreadTreeItemKeyPrefix = "thread:";
 
-    private readonly AppSettingsService _settingsService = new();
-    private readonly CodexThreadService _threadService = new();
-    private readonly ThreadTreeMonitor _threadTreeMonitor = new();
-    private readonly LocalizationService _localization = new();
+    private readonly IAppSettingsService _settingsService;
+    private readonly ICodexThreadService _threadService;
+    private readonly IThreadTreeMonitor _threadTreeMonitor;
+    private readonly IDiagnosticsService _diagnosticsService;
+    private readonly LocalizationService _localization;
     private readonly List<ThreadItemViewModel> _threads = new();
     private readonly HashSet<string> _selectedThreadIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly CancellationTokenSource _lifetime = new();
@@ -38,6 +39,7 @@ public sealed class MainViewModel : ObservableObject
     private bool _isBusy;
     private bool _isTreeLoading;
     private bool _isThreadLoading;
+    private bool _isReadOnlyMode;
     private ThreadItemViewModel? _selectedThread;
     private IReadOnlyList<ConversationMessage> _conversationMessages = Array.Empty<ConversationMessage>();
     private string _threadTimestampText = string.Empty;
@@ -47,7 +49,27 @@ public sealed class MainViewModel : ObservableObject
     private string _threadParameters = string.Empty;
 
     public MainViewModel()
+        : this(
+            new AppSettingsService(),
+            new CodexThreadService(),
+            new ThreadTreeMonitor(),
+            new DiagnosticsService(),
+            new LocalizationService())
     {
+    }
+
+    public MainViewModel(
+        IAppSettingsService settingsService,
+        ICodexThreadService threadService,
+        IThreadTreeMonitor threadTreeMonitor,
+        IDiagnosticsService diagnosticsService,
+        LocalizationService localization)
+    {
+        _settingsService = settingsService;
+        _threadService = threadService;
+        _threadTreeMonitor = threadTreeMonitor;
+        _diagnosticsService = diagnosticsService;
+        _localization = localization;
         _uiContext = SynchronizationContext.Current;
         LanguageOptions =
         [
@@ -57,8 +79,9 @@ public sealed class MainViewModel : ObservableObject
         UpdateThreadFilterOptions();
 
         RefreshCommand = new AsyncCommand(RefreshAsync, () => !IsBusy);
-        ElevateCommand = new AsyncCommand(ElevateSelectedAsync, () => !IsBusy && SelectedCount > 0);
-        ArchiveCommand = new AsyncCommand(ArchiveSelectedAsync, () => !IsBusy && SelectedCount > 0);
+        ElevateCommand = new AsyncCommand(ElevateSelectedAsync, () => !IsBusy && !IsReadOnlyMode && SelectedCount > 0);
+        ArchiveCommand = new AsyncCommand(ArchiveSelectedAsync, () => !IsBusy && !IsReadOnlyMode && SelectedCount > 0);
+        DiagnosticsCommand = new AsyncCommand(ShowDiagnosticsAsync, () => !IsBusy);
         ClearSelectionCommand = new RelayCommand(ClearSelection, () => !IsBusy && SelectedCount > 0);
         ClearSearchCommand = new RelayCommand(ClearSearch, () => HasSearchText);
         _threadTreeMonitor.Changed += OnThreadTreeChanged;
@@ -81,6 +104,8 @@ public sealed class MainViewModel : ObservableObject
     public AsyncCommand ElevateCommand { get; }
 
     public AsyncCommand ArchiveCommand { get; }
+
+    public AsyncCommand DiagnosticsCommand { get; }
 
     public RelayCommand ClearSelectionCommand { get; }
 
@@ -153,6 +178,18 @@ public sealed class MainViewModel : ObservableObject
         private set => SetProperty(ref _isThreadLoading, value);
     }
 
+    public bool IsReadOnlyMode
+    {
+        get => _isReadOnlyMode;
+        private set
+        {
+            if (SetProperty(ref _isReadOnlyMode, value))
+            {
+                NotifyCommands();
+            }
+        }
+    }
+
     public string StatusText
     {
         get => _statusText;
@@ -223,6 +260,8 @@ public sealed class MainViewModel : ObservableObject
 
     public string ClearSelectionText => _localization["ClearSelection"];
 
+    public string DiagnosticsText => _localization["Diagnostics"];
+
     public string RefreshToolTipText => _localization["RefreshToolTip"];
 
     public string ElevateToolTipText => _localization["ElevateToolTip"];
@@ -231,7 +270,13 @@ public sealed class MainViewModel : ObservableObject
 
     public string ClearSelectionToolTipText => _localization["ClearSelectionToolTip"];
 
+    public string DiagnosticsToolTipText => _localization["DiagnosticsToolTip"];
+
     public string SelectedSummaryToolTipText => _localization["SelectedSummaryToolTip"];
+
+    public string ReadOnlyModeText => _localization["ReadOnlyMode"];
+
+    public string ReadOnlyModeToolTipText => _localization["ReadOnlyModeToolTip"];
 
     public string ThreadFilterToolTipText => _localization["ThreadFilterToolTip"];
 
@@ -388,15 +433,16 @@ public sealed class MainViewModel : ObservableObject
                 return;
             }
 
+            var message = GetDisplayErrorMessage(ex);
             ConversationMessages =
             [
-                new ConversationMessage("error", string.Format(_localization["OpenFailed"], ex.Message), ConversationMessageKind.Error)
+                new ConversationMessage("error", string.Format(_localization["OpenFailed"], message), ConversationMessageKind.Error)
             ];
             DeveloperInstructions = string.Empty;
             UserInstructions = string.Empty;
             ThreadParameters = string.Empty;
             ClearThreadParameterNodes();
-            StatusText = string.Format(_localization["OpenFailed"], ex.Message);
+            StatusText = string.Format(_localization["OpenFailed"], message);
         }
         finally
         {
@@ -446,6 +492,8 @@ public sealed class MainViewModel : ObservableObject
         await _threadService.DisposeAsync();
         _lifetime.Dispose();
     }
+
+    public event EventHandler<DiagnosticsSnapshot>? DiagnosticsRequested;
 
     public string GetRoleDisplayName(ConversationMessage message)
     {
@@ -526,15 +574,16 @@ public sealed class MainViewModel : ObservableObject
                     return;
                 }
 
+                var message = GetDisplayErrorMessage(ex);
                 ConversationMessages =
                 [
-                    new ConversationMessage("error", string.Format(_localization["OpenFailed"], ex.Message), ConversationMessageKind.Error)
+                    new ConversationMessage("error", string.Format(_localization["OpenFailed"], message), ConversationMessageKind.Error)
                 ];
                 DeveloperInstructions = string.Empty;
                 UserInstructions = string.Empty;
                 ThreadParameters = string.Empty;
                 ClearThreadParameterNodes();
-                StatusText = string.Format(_localization["OpenFailed"], ex.Message);
+                StatusText = string.Format(_localization["OpenFailed"], message);
                 return;
             }
         }
@@ -578,6 +627,7 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             var threads = await _threadService.GetAllThreadsAsync(_lifetime.Token);
+            IsReadOnlyMode = _threadService.IsReadOnlyMode;
             foreach (var oldThread in _threads)
             {
                 oldThread.PropertyChanged -= OnThreadPropertyChanged;
@@ -628,14 +678,16 @@ public sealed class MainViewModel : ObservableObject
                 .Count();
             if (!automatic)
             {
-                StatusText = string.Format(_localization["RefreshDone"], _threads.Count, projectCount);
+                StatusText = IsReadOnlyMode
+                    ? string.Format(_localization["ReadOnlyRefreshDone"], _threads.Count, projectCount)
+                    : string.Format(_localization["RefreshDone"], _threads.Count, projectCount);
             }
         }
         catch (Exception ex)
         {
             if (!automatic)
             {
-                StatusText = string.Format(_localization["OperationFailed"], ex.Message);
+                StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
             }
         }
         finally
@@ -693,21 +745,45 @@ public sealed class MainViewModel : ObservableObject
     {
         IsBusy = true;
         var completed = 0;
+        var failed = 0;
+        Exception? lastException = null;
 
         try
         {
             foreach (var thread in selected)
             {
                 StatusText = $"{thread.Name}...";
-                await operation(thread);
-                completed++;
+                try
+                {
+                    await operation(thread);
+                    completed++;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    lastException = ex;
+                    DiagnosticLogService.Warning($"Thread operation failed for '{thread.Id}'.", ex);
+                }
             }
 
-            StatusText = string.Format(successFormat, completed);
+            StatusText = failed == 0
+                ? string.Format(successFormat, completed)
+                : string.Format(
+                    _localization["OperationPartialDone"],
+                    completed,
+                    failed,
+                    lastException is null ? string.Empty : GetDisplayErrorMessage(lastException));
+        }
+        catch (OperationCanceledException)
+        {
         }
         catch (Exception ex)
         {
-            StatusText = string.Format(_localization["OperationFailed"], ex.Message);
+            StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
         }
         finally
         {
@@ -1025,6 +1101,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        _threadService.InvalidateCache();
         if (_uiContext is not null)
         {
             _uiContext.Post(_ => QueueAutoRefresh(), null);
@@ -1069,7 +1146,31 @@ public sealed class MainViewModel : ObservableObject
         RefreshCommand.NotifyCanExecuteChanged();
         ElevateCommand.NotifyCanExecuteChanged();
         ArchiveCommand.NotifyCanExecuteChanged();
+        DiagnosticsCommand.NotifyCanExecuteChanged();
         ClearSelectionCommand.NotifyCanExecuteChanged();
+    }
+
+    private async Task ShowDiagnosticsAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            StatusText = _localization["LoadingDiagnostics"];
+            var snapshot = await _diagnosticsService.CreateSnapshotAsync(IsReadOnlyMode, _lifetime.Token);
+            DiagnosticsRequested?.Invoke(this, snapshot);
+            StatusText = _localization["Ready"];
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            StatusText = string.Format(_localization["OperationFailed"], GetDisplayErrorMessage(ex));
+        }
+        finally
+        {
+            IsBusy = false;
+        }
     }
 
     private void ClearThreadContent()
@@ -1097,12 +1198,16 @@ public sealed class MainViewModel : ObservableObject
         OnPropertyChanged(nameof(RefreshText));
         OnPropertyChanged(nameof(ElevateText));
         OnPropertyChanged(nameof(ArchiveText));
+        OnPropertyChanged(nameof(DiagnosticsText));
         OnPropertyChanged(nameof(ClearSelectionText));
         OnPropertyChanged(nameof(RefreshToolTipText));
         OnPropertyChanged(nameof(ElevateToolTipText));
         OnPropertyChanged(nameof(ArchiveToolTipText));
+        OnPropertyChanged(nameof(DiagnosticsToolTipText));
         OnPropertyChanged(nameof(ClearSelectionToolTipText));
         OnPropertyChanged(nameof(SelectedSummaryToolTipText));
+        OnPropertyChanged(nameof(ReadOnlyModeText));
+        OnPropertyChanged(nameof(ReadOnlyModeToolTipText));
         OnPropertyChanged(nameof(ThreadFilterToolTipText));
         OnPropertyChanged(nameof(LanguageToolTipText));
         OnPropertyChanged(nameof(SearchTextLabel));
@@ -1161,6 +1266,17 @@ public sealed class MainViewModel : ObservableObject
         }
 
         cancellation?.Cancel();
+    }
+
+    private string GetDisplayErrorMessage(Exception exception)
+    {
+        return exception switch
+        {
+            CodexCliMissingException => _localization["CodexCliMissing"],
+            CodexAppServerUnsupportedException => _localization["CodexAppServerUnsupported"],
+            CodexReadOnlyModeException => _localization["ReadOnlyOperationUnavailable"],
+            _ => exception.Message
+        };
     }
 
     private static string FormatModelEffort(string? model, string? effort, long? modelContextWindow)

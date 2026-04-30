@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -15,6 +14,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private readonly CodexCliLocator _cliLocator = new();
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly TimeSpan _requestTimeout = TimeSpan.FromSeconds(45);
     private readonly StringBuilder _stderr = new();
@@ -156,7 +156,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
             return;
         }
 
-        StartProcess();
+        await StartProcessAsync(cancellationToken);
 
         _ = await SendRequestCoreAsync(
             "initialize",
@@ -179,29 +179,17 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         _initialized = true;
     }
 
-    private void StartProcess()
+    private async Task StartProcessAsync(CancellationToken cancellationToken)
     {
         if (_process is { HasExited: false })
         {
             return;
         }
 
-        var command = ResolveCodexCommand();
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = command.FileName,
-            Arguments = command.Arguments,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = new UTF8Encoding(false),
-            StandardErrorEncoding = new UTF8Encoding(false)
-        };
+        var command = await _cliLocator.FindAppServerCommandAsync(cancellationToken);
+        var startInfo = CodexCliLocator.CreateStartInfo(command, redirectStandardInput: true);
 
-        _process = new Process
+        var process = new Process
         {
             StartInfo = startInfo,
             EnableRaisingEvents = true
@@ -209,22 +197,26 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
         try
         {
-            if (!_process.Start())
+            if (!process.Start())
             {
                 throw new AppServerException("Could not start codex app-server.");
             }
         }
         catch (Exception ex) when (ex is not AppServerException)
         {
+            process.Dispose();
+            DiagnosticLogService.Error("Could not start Codex app-server.", ex);
             throw new AppServerException("Could not start codex app-server.", ex);
         }
 
+        _process = process;
         _stderr.Clear();
+        DiagnosticLogService.Info($"Started Codex app-server process {process.Id}.");
         _stderrPump = Task.Run(async () =>
         {
-            while (_process is { HasExited: false })
+            while (!process.HasExited)
             {
-                var line = await _process.StandardError.ReadLineAsync();
+                var line = await process.StandardError.ReadLineAsync();
                 if (line is null)
                 {
                     break;
@@ -237,6 +229,8 @@ public sealed class CodexAppServerClient : IAsyncDisposable
                         _stderr.AppendLine(line);
                     }
                 }
+
+                DiagnosticLogService.Warning($"Codex app-server stderr: {line}");
             }
         });
     }
@@ -275,6 +269,7 @@ public sealed class CodexAppServerClient : IAsyncDisposable
 
             if (root.TryGetProperty("error", out var error))
             {
+                DiagnosticLogService.Warning($"Codex app-server returned error for {method}: {error.GetRawText()}");
                 throw new AppServerException($"app-server returned error for {method}: {error.GetRawText()}");
             }
 
@@ -303,13 +298,13 @@ public sealed class CodexAppServerClient : IAsyncDisposable
         var completed = await Task.WhenAny(readTask, timeoutTask);
         if (completed == timeoutTask)
         {
-            throw new AppServerException($"Timed out waiting for codex app-server. {GetStderrSuffix()}");
+            throw new AppServerException($"Timed out waiting for Codex app-server. Make sure `codex app-server` can start successfully. {GetStderrSuffix()}");
         }
 
         var line = await readTask;
         if (line is null)
         {
-            throw new AppServerException($"codex app-server exited before responding. {GetStderrSuffix()}");
+            throw new AppServerException($"Codex app-server exited before responding. Make sure your Codex CLI supports `codex app-server --listen stdio://`. {GetStderrSuffix()}");
         }
 
         return line;
@@ -392,47 +387,4 @@ public sealed class CodexAppServerClient : IAsyncDisposable
             char.IsDigit(value[9]);
     }
 
-    private static (string FileName, string Arguments) ResolveCodexCommand()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return ("codex", "app-server --listen stdio://");
-        }
-
-        foreach (var candidate in EnumeratePathCandidates())
-        {
-            var extension = Path.GetExtension(candidate);
-            if (extension.Equals(".ps1", StringComparison.OrdinalIgnoreCase))
-            {
-                return ("powershell.exe", $"-NoLogo -NoProfile -ExecutionPolicy Bypass -File \"{candidate}\" app-server --listen stdio://");
-            }
-
-            if (extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase) ||
-                extension.Equals(".bat", StringComparison.OrdinalIgnoreCase))
-            {
-                return ("cmd.exe", $"/d /c \"\"{candidate}\" app-server --listen stdio://\"");
-            }
-
-            return (candidate, "app-server --listen stdio://");
-        }
-
-        return ("cmd.exe", "/d /c \"codex app-server --listen stdio://\"");
-    }
-
-    private static IEnumerable<string> EnumeratePathCandidates()
-    {
-        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        var names = new[] { "codex.cmd", "codex.exe", "codex.bat", "codex.ps1" };
-        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            foreach (var name in names)
-            {
-                var candidate = Path.Combine(directory, name);
-                if (File.Exists(candidate))
-                {
-                    yield return candidate;
-                }
-            }
-        }
-    }
 }

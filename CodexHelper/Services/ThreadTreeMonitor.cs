@@ -2,7 +2,7 @@ using System.IO;
 
 namespace CodexHelper.Services;
 
-public sealed class ThreadTreeMonitor : IDisposable
+public sealed class ThreadTreeMonitor : IThreadTreeMonitor
 {
     private static readonly TimeSpan DebounceInterval = TimeSpan.FromMilliseconds(1200);
     private readonly object _gate = new();
